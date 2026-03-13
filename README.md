@@ -48,7 +48,41 @@ cd AI_Document_V3
 
 ---
 
-## 2. 用 uv 安裝 backend
+## 2. 先理解啟動方式（很重要）
+
+這個專案目前是 **前後端分離架構**：
+
+- `backend/`：FastAPI API + OCR + RAG 邏輯
+- `frontend/`：React / Vite 使用者介面
+
+### 本機開發模式
+如果你用原生方式啟動，通常需要 **兩個終端機**：
+
+- 終端機 1：啟動 backend
+- 終端機 2：啟動 frontend
+
+### 容器模式
+如果你使用 Docker Compose：
+
+```bash
+docker compose up --build
+```
+
+雖然底層還是 frontend + backend 兩個服務，
+但你不需要自己手動開兩個 terminal 管理。
+
+### Ollama 建議部署方式
+目前最建議的方式是：
+
+- frontend：本機或容器
+- backend：本機或容器
+- **Ollama：跑在宿主機（host machine）**
+
+也就是說，**不要先急著把 Ollama 包進 compose**，先讓它直接安裝在你的電腦上會比較穩定、也比較容易除錯。
+
+---
+
+## 3. 用 uv 安裝 backend
 
 `backend/` 已補上 `pyproject.toml`，可以直接用 `uv` 建立虛擬環境與安裝依賴。
 
@@ -230,6 +264,24 @@ chmod +x setup.sh
 
 如果你想在另一台電腦快速部署，也可以直接走容器方式。
 
+### 我建議的部署組合
+
+目前最推薦的是這個組合：
+
+- **frontend：容器**
+- **backend：容器**
+- **Ollama：宿主機安裝（不要先容器化）**
+
+這樣做的好處是：
+- 比較容易安裝與除錯
+- 比較不容易卡在 GPU / 網路 / volume 問題
+- 未來要改模型或檢查 Ollama 狀態也比較直覺
+
+如果你是：
+- **macOS**：很建議用這個模式
+- **Windows + WSL**：也建議先走這個模式
+- **Linux**：也可以用這個模式當第一版部署
+
 ### 先安裝 Docker
 
 請先安裝：
@@ -280,17 +332,28 @@ docker compose up --build
    - frontend
    - backend
 
-2. **Ollama 目前仍建議安裝在宿主機**，尚未內建進 compose。
+2. **Ollama 目前建議直接安裝在宿主機**，不要先放進 compose。
 
-3. 若 backend 在容器內，但 Ollama 在宿主機，`OLLAMA_BASE_URL` 可能需要改成宿主機可被容器連到的位址，而不是單純 `127.0.0.1`。
+3. 若 backend 在容器內，但 Ollama 在宿主機，`OLLAMA_BASE_URL` 不要直接寫 `127.0.0.1`，因為那會指向容器自己。
 
-例如在某些環境可改成：
+#### macOS / Windows Docker Desktop
+通常可用：
 
 ```env
 OLLAMA_BASE_URL=http://host.docker.internal:11434
 ```
 
-Linux 環境則可能需要改成實際主機 IP。
+#### Linux
+通常要改成宿主機的實際 IP，例如：
+
+```env
+OLLAMA_BASE_URL=http://192.168.1.100:11434
+```
+
+4. 如果你只是想先把整個專案跑起來，建議順序是：
+   - 先安裝並確認宿主機上的 Ollama 可用
+   - 再用 `docker compose up --build` 啟動 frontend + backend
+   - 最後再測試 OCR / embedding / RAG
 
 ---
 
@@ -330,7 +393,37 @@ newgrp docker
 
 ---
 
-## 13. Windows / WSL 安裝建議
+## 13. macOS 安裝建議
+
+macOS 原則上可以跑，而且我更建議這樣做：
+
+- Docker Desktop 跑 frontend + backend
+- Ollama 直接安裝在 macOS 宿主機
+
+### 建議流程
+
+1. 安裝 Docker Desktop
+2. 安裝 Ollama（宿主機）
+3. 先在宿主機確認 Ollama 正常
+4. clone 專案
+5. 複製 `backend/.env_example` 成 `backend/.env`
+6. 將 `OLLAMA_BASE_URL` 設成：
+
+```env
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+```
+
+7. 啟動：
+
+```bash
+docker compose up --build
+```
+
+這樣通常是最省事的 macOS 跑法。
+
+---
+
+## 14. Windows / WSL 安裝建議
 
 如果你是在 Windows 上部署，建議走：
 - **Windows 11 + WSL2 + Ubuntu**
@@ -393,7 +486,7 @@ OLLAMA_BASE_URL=http://127.0.0.1:11434
 
 ---
 
-## 13. 建議後續改善
+## 15. 建議後續改善
 
 - 補正式的 Alembic migration
 - 補 Ollama service 版的 compose
