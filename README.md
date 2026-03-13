@@ -226,9 +226,26 @@ chmod +x setup.sh
 
 ---
 
-## 11. Docker Compose
+## 11. 容器 / Docker 安裝方式
 
-如果你想快速在另一台電腦把前後端一起拉起來，專案根目錄已補上：
+如果你想在另一台電腦快速部署，也可以直接走容器方式。
+
+### 先安裝 Docker
+
+請先安裝：
+- Docker Desktop（Windows / macOS）
+- 或 Docker Engine + Docker Compose Plugin（Linux）
+
+安裝完成後先確認：
+
+```bash
+docker --version
+docker compose version
+```
+
+### 啟動方式
+
+專案根目錄已補上：
 - `docker-compose.yml`
 
 用法：
@@ -245,12 +262,75 @@ docker compose up --build
 - Frontend: `http://127.0.0.1:3000`
 - Backend: `http://127.0.0.1:8000`
 
-> 目前 compose 先包含 frontend + backend。
-> Ollama 仍建議安裝在宿主機，或之後再另外補成獨立服務。
+### 停止容器
+
+```bash
+docker compose down
+```
+
+### 重新建置
+
+```bash
+docker compose up --build
+```
+
+### 注意事項
+
+1. 目前 compose 先包含：
+   - frontend
+   - backend
+
+2. **Ollama 目前仍建議安裝在宿主機**，尚未內建進 compose。
+
+3. 若 backend 在容器內，但 Ollama 在宿主機，`OLLAMA_BASE_URL` 可能需要改成宿主機可被容器連到的位址，而不是單純 `127.0.0.1`。
+
+例如在某些環境可改成：
+
+```env
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+```
+
+Linux 環境則可能需要改成實際主機 IP。
 
 ---
 
-## 12. Windows / WSL 安裝建議
+## 12. Docker 安裝補充（Ubuntu / Linux）
+
+若你是在 Ubuntu / Linux 安裝 Docker，可參考以下基本流程：
+
+```bash
+sudo apt update
+sudo apt install -y ca-certificates curl gnupg
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo $VERSION_CODENAME) stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+
+驗證：
+
+```bash
+docker --version
+docker compose version
+```
+
+若想避免每次都加 `sudo`：
+
+```bash
+sudo usermod -aG docker $USER
+newgrp docker
+```
+
+---
+
+## 13. Windows / WSL 安裝建議
 
 如果你是在 Windows 上部署，建議走：
 - **Windows 11 + WSL2 + Ubuntu**
