@@ -130,18 +130,18 @@ SECRET_KEY=換成你自己的長隨機字串
 如果要啟用完整 RAG / LLM / embedding 功能，也要先準備 Ollama：
 
 ```bash
-ollama pull llama3.2
-ollama pull llava
-ollama pull all-minilm
+ollama pull qwen3:8b
+ollama pull qwen2.5vl:7b
+ollama pull quentinz/bge-large-zh-v1.5:latest
 ```
 
 預設 `.env`：
 
 ```env
 OLLAMA_BASE_URL=http://127.0.0.1:11434
-OLLAMA_LLM_MODEL=llama3.2
-OLLAMA_VISION_MODEL=llava
-OLLAMA_EMBED_MODEL=all-minilm
+OLLAMA_LLM_MODEL=qwen3:8b
+OLLAMA_VISION_MODEL=qwen2.5vl:7b
+OLLAMA_EMBED_MODEL=quentinz/bge-large-zh-v1.5:latest
 ```
 
 ---

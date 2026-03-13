@@ -29,9 +29,9 @@ class Settings(BaseSettings):
 
     # Ollama 推理服務
     OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
-    OLLAMA_LLM_MODEL: str = "llama3.2"
-    OLLAMA_VISION_MODEL: str = "llava"
-    OLLAMA_EMBED_MODEL: str = "all-minilm"
+    OLLAMA_LLM_MODEL: str = "qwen3:8b"
+    OLLAMA_VISION_MODEL: str = "qwen2.5vl:7b"
+    OLLAMA_EMBED_MODEL: str = "quentinz/bge-large-zh-v1.5:latest"
     OLLAMA_KEEP_ALIVE: str = "5m"
     OLLAMA_TIMEOUT: int = 120  # seconds
     # Optional generation controls (help avoid truncated answers)
