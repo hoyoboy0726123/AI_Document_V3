@@ -423,62 +423,76 @@ docker compose up --build
 
 ---
 
-## 14. Windows / WSL 安裝建議
+## 14. Windows 安裝建議
 
-如果你是在 Windows 上部署，建議走：
-- **Windows 11 + WSL2 + Ubuntu**
+如果你是在 Windows 上部署，建議直接走：
+- **Windows 原生安裝**
+- 或 **Docker Desktop + 宿主機 Ollama**
 
-### 步驟摘要
+### 建議做法 A：Docker Desktop（最推薦）
 
-1. 安裝 WSL2
+1. 安裝 Docker Desktop
+2. 在 Windows 安裝 Ollama
+3. clone 專案
+4. 複製設定檔：
+
 ```powershell
-wsl --install
+copy backend\.env_example backend\.env
 ```
 
-2. 進入 Ubuntu 後安裝基礎工具
-```bash
-sudo apt update
-sudo apt install -y curl git build-essential python3 python3-dev python3-pip npm
+5. 編輯 `backend/.env`，將 Ollama 指向宿主機：
+
+```env
+OLLAMA_BASE_URL=http://host.docker.internal:11434
 ```
 
-3. 安裝 uv
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
+6. 啟動：
+
+```powershell
+docker compose up --build
 ```
 
-4. clone 專案
-```bash
+### 建議做法 B：Windows 原生啟動
+
+先安裝：
+- Python 3.12
+- Node.js 22
+- uv
+- Ollama
+
+然後：
+
+```powershell
 git clone https://github.com/hoyoboy0726123/AI_Document_V3.git
 cd AI_Document_V3
 ```
 
-5. 執行一鍵安裝
-```bash
-./setup.sh
-```
+#### backend
 
-6. 啟動 backend
-```bash
+```powershell
 cd backend
+copy .env_example .env
+uv sync
 uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-7. 啟動 frontend
-```bash
+#### frontend（另一個 terminal）
+
+```powershell
 cd frontend
-npm run dev -- --host 0.0.0.0 --port 3000
+npm install
+npm run dev
 ```
 
-### WSL 注意事項
+### Windows 注意事項
 
-- 若 Ollama 裝在 Windows 而 backend 跑在 WSL，`OLLAMA_BASE_URL` 可能不能直接用 `127.0.0.1`
-- 你可能需要改成 Windows 主機 IP，例如：
+- 如果 backend 跑在容器內，而 Ollama 跑在 Windows 宿主機，請優先使用：
 
 ```env
-OLLAMA_BASE_URL=http://<windows-host-ip>:11434
+OLLAMA_BASE_URL=http://host.docker.internal:11434
 ```
 
-- 如果你是全部都裝在 WSL，那就維持：
+- 如果 frontend / backend 都是 Windows 原生執行，通常可維持：
 
 ```env
 OLLAMA_BASE_URL=http://127.0.0.1:11434
