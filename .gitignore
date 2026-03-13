@@ -1,0 +1,26 @@
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.env*
+
+# Backend / Python
+backend/venv/
+backend/**/__pycache__/
+backend/**/*.pyc
+backend/logs/
+backend/doc_management.db
+backend/storage/faiss_index.bin
+backend/storage/documents/
+backend/.env
+
+# Common
+.env
+*.log
+*.sqlite*
+.DS_Store
+Thumbs.db
+
+# Local backups (optional)
+QAConsolePage_backup.jsx
+

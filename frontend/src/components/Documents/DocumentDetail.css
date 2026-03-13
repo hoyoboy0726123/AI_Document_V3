@@ -1,0 +1,134 @@
+/* Markdown 內容容器 */
+.markdown-content {
+  /* 限制重繪範圍 */
+  contain: layout style;
+  /* 虛擬化：只渲染可見內容 */
+  content-visibility: auto;
+}
+
+/* Markdown 表格樣式（marked 生成的原生 HTML） */
+.markdown-content table,
+.analysis-summary-container table,
+.conversation-bubble-ai table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-top: 12px;
+  margin-bottom: 12px;
+  /* 優化大表格渲染性能 - 固定佈局避免重新計算（速度提升 100 倍）*/
+  table-layout: fixed !important;
+  /* CSS Contain：隔離渲染，限制重繪範圍 */
+  contain: strict;
+  /* 虛擬化：跳過螢幕外的渲染 */
+  content-visibility: auto;
+}
+
+.markdown-content thead,
+.analysis-summary-container thead,
+.conversation-bubble-ai thead {
+  background-color: #f0f0f0;
+}
+
+.markdown-content th,
+.analysis-summary-container th,
+.conversation-bubble-ai th {
+  border: 1px solid #ddd;
+  padding: 8px;
+  text-align: left;
+  font-weight: bold;
+  /* 避免內容溢出 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-wrap: break-word;
+}
+
+.markdown-content td,
+.analysis-summary-container td,
+.conversation-bubble-ai td {
+  border: 1px solid #ddd;
+  padding: 8px;
+  /* 避免內容溢出 */
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.markdown-content tr,
+.analysis-summary-container tr,
+.conversation-bubble-ai tr {
+  border-bottom: 1px solid #ddd;
+}
+
+/* 舊的類名樣式（向後兼容） */
+.markdown-table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-top: 12px;
+  margin-bottom: 12px;
+  table-layout: fixed;
+  will-change: transform;
+  contain: layout style paint;
+}
+
+.markdown-thead {
+  background-color: #f0f0f0;
+}
+
+.markdown-th {
+  border: 1px solid #ddd;
+  padding: 8px;
+  text-align: left;
+  font-weight: bold;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-wrap: break-word;
+}
+
+.markdown-td {
+  border: 1px solid #ddd;
+  padding: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-wrap: break-word;
+}
+
+.markdown-tr {
+  border-bottom: 1px solid #ddd;
+}
+
+/* 對話歷史樣式 */
+.conversation-message-user {
+  text-align: right;
+  margin-bottom: 12px;
+}
+
+.conversation-message-ai {
+  text-align: left;
+  margin-bottom: 12px;
+}
+
+.conversation-bubble-user {
+  display: inline-block;
+  max-width: 80%;
+  padding: 8px 12px;
+  background-color: #e6f7ff;
+  border-radius: 8px;
+  margin-top: 4px;
+  text-align: left;
+}
+
+.conversation-bubble-ai {
+  display: inline-block;
+  max-width: 80%;
+  padding: 8px 12px;
+  background-color: #f6ffed;
+  border-radius: 8px;
+  margin-top: 4px;
+  /* 優化大型內容渲染 */
+  will-change: transform;
+}
+
+/* 分析摘要容器 */
+.analysis-summary-container {
+  white-space: pre-wrap;
+  /* 優化渲染性能 */
+  contain: layout style;
+}

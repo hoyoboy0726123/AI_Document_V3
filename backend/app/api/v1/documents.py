@@ -1,0 +1,1053 @@
+﻿import logging
+import re
+import uuid
+from pathlib import Path
+from typing import Dict, List, Optional
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+from pdfminer.pdfdocument import PDFPasswordIncorrect
+
+from ... import models, schemas
+from ...core.config import settings
+from ...core.security import get_current_user
+from ...database import get_db
+from ...services import ai
+from ...services.documents import DocumentService
+from ...services.metadata import MetadataService
+from ...services.pdf_processing import extract_text_and_segments, suggest_keywords
+from ...services.pdf_image import get_pdf_page_count
+from ...utils.security import validate_file_path
+from ...utils.logging_config import get_logger
+from ...utils.exceptions import ResourceNotFoundError, ValidationError
+from ...utils.validators import ClassificationValidator, FileValidator
+
+logger = get_logger(__name__)
+
+router = APIRouter()
+
+
+def _doc_service(db: Session) -> DocumentService:
+    return DocumentService(db)
+
+
+def _metadata_service(db: Session) -> MetadataService:
+    return MetadataService(db)
+
+
+def _list_active_classifications(db: Session) -> List[models.ClassificationCategory]:
+    return (
+        db.query(models.ClassificationCategory)
+        .filter(models.ClassificationCategory.is_active.is_(True))
+        .order_by(models.ClassificationCategory.name)
+        .all()
+    )
+
+
+def _find_metadata_field(metadata_service: MetadataService, field_name: str, fields=None):
+    candidates = fields if fields is not None else metadata_service.list_fields(active_only=True)
+    for field in candidates:
+        if field.name == field_name:
+            return field
+    return None
+
+
+def _match_option_value(options, candidate: Optional[str]) -> Optional[str]:
+    if not candidate:
+        return None
+
+    normalized = candidate.strip().lower()
+    for option in options or []:
+        value = getattr(option, "value", None)
+        display = getattr(option, "display_value", None)
+        if value and value.lower() == normalized:
+            return value
+        if display and display.lower() == normalized:
+            return value
+    return None
+
+
+def _generate_classification_code(db: Session, name: str) -> str:
+    base = re.sub(r"[^A-Za-z0-9]", "", name).upper() or "CLS"
+    base = base[:12]
+    candidate = base
+    counter = 1
+    while (
+        db.query(models.ClassificationCategory)
+        .filter(models.ClassificationCategory.code == candidate)
+        .first()
+        is not None
+    ):
+        counter += 1
+        candidate = f"{base[:10]}{counter:02d}"
+    return candidate
+
+
+def _ensure_classification_category(
+    db: Session,
+    *,
+    name: str,
+    description: Optional[str],
+) -> models.ClassificationCategory:
+    normalized_name = name.strip()
+    existing = (
+        db.query(models.ClassificationCategory)
+        .filter(func.lower(models.ClassificationCategory.name) == normalized_name.lower())
+        .first()
+    )
+    if existing:
+        return existing
+
+    code = _generate_classification_code(db, normalized_name)
+    category = models.ClassificationCategory(
+        name=normalized_name,
+        code=code,
+        description=description or None,
+        is_active=True,
+    )
+    db.add(category)
+    db.commit()
+    db.refresh(category)
+    return category
+
+
+def _ensure_project_option(
+    metadata_service: MetadataService,
+    *,
+    display_name: str,
+    description: Optional[str],
+) -> models.MetadataOption:
+    field = _find_metadata_field(metadata_service, "project_id")
+    if field is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="專案欄位尚未在系統中設定",
+        )
+
+    normalized_display = display_name.strip()
+    for option in field.options:
+        if option.display_value == normalized_display or option.value == normalized_display:
+            return option
+
+    value_base = re.sub(r"[^A-Za-z0-9]", "_", normalized_display).strip("_").lower() or "proj"
+    candidate = value_base[:32]
+    existing_values = {opt.value for opt in field.options}
+    counter = 1
+    while candidate in existing_values:
+        candidate = f"{value_base[:24]}_{counter}"
+        counter += 1
+
+    option = metadata_service.add_option(
+        field,
+        value=candidate,
+        display_value=normalized_display,
+        order_index=len(field.options),
+    )
+    if description:
+        option.display_value = normalized_display
+    return option
+
+
+@router.get("", response_model=schemas.DocumentListResponse)
+@router.get("/", response_model=schemas.DocumentListResponse)
+def list_documents(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    search_term: Optional[str] = None,
+    classification_id: Optional[str] = None,
+    file_type: Optional[str] = None,
+    project_id: Optional[str] = None,
+    keywords: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    doc_service = _doc_service(db)
+
+    metadata_filters: Dict[str, object] = {}
+    if file_type:
+        metadata_filters["file_type"] = file_type
+    if project_id:
+        metadata_filters["project_id"] = project_id
+    if keywords:
+        metadata_filters["keywords"] = [item.strip() for item in keywords.split(",") if item.strip()]
+
+    documents, total = doc_service.list(
+        page=page,
+        page_size=page_size,
+        search_term=search_term,
+        classification_id=classification_id,
+        metadata_filters=metadata_filters or None,
+    )
+    return schemas.DocumentListResponse(items=documents, total=total, page=page, page_size=page_size)
+
+
+@router.get("/classifications", response_model=List[schemas.ClassificationSummary])
+def list_classifications(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    _ = current_user
+    categories = _list_active_classifications(db)
+    return [schemas.ClassificationSummary.model_validate(cat) for cat in categories]
+
+
+@router.post("/suggestions/accept", response_model=schemas.SuggestionAcceptanceResponse)
+def accept_suggestion_recommendations(
+    payload: schemas.SuggestionAcceptanceRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    metadata_service = _metadata_service(db)
+
+    classification_obj = None
+    if payload.classification and payload.classification.name:
+        classification_obj = _ensure_classification_category(
+            db,
+            name=payload.classification.name,
+            description=payload.classification.description,
+        )
+
+    project_option = None
+    if payload.project and payload.project.display_name:
+        project_option = _ensure_project_option(
+            metadata_service,
+            display_name=payload.project.display_name,
+            description=payload.project.description,
+        )
+
+    return schemas.SuggestionAcceptanceResponse(
+        classification=schemas.ClassificationSummary.model_validate(classification_obj)
+        if classification_obj
+        else None,
+        project_option=schemas.MetadataOptionRead.model_validate(project_option) if project_option else None,
+    )
+
+
+@router.post("", response_model=schemas.DocumentRead, status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=schemas.DocumentRead, status_code=status.HTTP_201_CREATED)
+def create_document(
+    payload: schemas.DocumentCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    logger.info(f"收到文件創建請求：標題='{payload.title}'，用戶={current_user.username}，is_image_based={payload.is_image_based}")
+
+    doc_service = _doc_service(db)
+    metadata_service = _metadata_service(db)
+    required_fields = metadata_service.list_required_fields()
+    doc_service.validate_metadata(payload.metadata, required_fields)
+
+    # Validate and get classification category
+    classification = ClassificationValidator.get_active_or_none(db, payload.classification_id)
+
+    logger.info(f"開始創建文件：分類={classification.name if classification else 'None'}，metadata={payload.metadata}")
+
+    document = doc_service.create(
+        title=payload.title,
+        content=payload.content,
+        metadata=payload.metadata,
+        creator=current_user,
+        classification=classification,
+        pdf_temp_path=payload.source_pdf_path,
+        segments=payload.segments,  # 傳遞預先提取的 segments，避免重複處理
+        ai_summary=payload.ai_summary,
+        is_image_based=payload.is_image_based,
+        original_filename=payload.original_filename,
+    )
+
+    logger.info(f"文件創建成功：ID={document.id}，ocr_status={document.ocr_status}")
+
+    return document
+
+
+def _get_document_or_404(doc_service: DocumentService, document_id: str) -> models.Document:
+    document = doc_service.get(document_id)
+    if not document:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    return document
+
+
+@router.get("/search-text-all", response_model=schemas.CrossDocumentSearchResponse)
+def search_all_documents_text(
+    q: str = Query(..., min_length=1, description="搜尋關鍵字"),
+    classification_id: Optional[str] = None,
+    file_type: Optional[str] = None,
+    project_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    跨文件全文檢索
+
+    支援：
+    - 大小寫不敏感
+    - 忽略多餘空格
+    - 尊重當前篩選條件
+    - 返回匹配的文件、頁碼和上下文
+    """
+    # 正規化搜尋關鍵字
+    normalized_query = " ".join(q.strip().split())
+
+    if not normalized_query:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="搜尋關鍵字不可為空"
+        )
+
+    # 構建文件查詢條件
+    doc_query = db.query(models.Document)
+
+    # 應用篩選條件
+    if classification_id:
+        doc_query = doc_query.filter(models.Document.classification_id == classification_id)
+
+    if file_type:
+        doc_query = doc_query.filter(
+            func.json_extract(models.Document.metadata_data, '$.file_type') == file_type
+        )
+
+    if project_id:
+        doc_query = doc_query.filter(
+            func.json_extract(models.Document.metadata_data, '$.project_id') == project_id
+        )
+
+    # 獲取符合篩選條件的文件 IDs
+    document_ids = [doc.id for doc in doc_query.all()]
+
+    if not document_ids:
+        return schemas.CrossDocumentSearchResponse(
+            query=normalized_query,
+            total_matches=0,
+            total_documents=0,
+            matches=[]
+        )
+
+    # 在這些文件的 chunks 中搜尋
+    chunks = (
+        db.query(models.DocumentChunk, models.Document.title)
+        .join(models.Document, models.DocumentChunk.document_id == models.Document.id)
+        .filter(
+            models.DocumentChunk.document_id.in_(document_ids),
+            func.lower(models.DocumentChunk.text).contains(func.lower(normalized_query))
+        )
+        .order_by(models.Document.title, models.DocumentChunk.page, models.DocumentChunk.paragraph_index)
+        .all()
+    )
+
+    # 構建搜尋結果
+    matches = []
+    unique_documents = set()
+
+    for chunk, doc_title in chunks:
+        unique_documents.add(chunk.document_id)
+
+        # 找出匹配的文字片段
+        text_lower = chunk.text.lower()
+        query_lower = normalized_query.lower()
+        start_idx = text_lower.find(query_lower)
+
+        if start_idx != -1:
+            matched_text = chunk.text[start_idx:start_idx + len(normalized_query)]
+
+            # 生成摘錄
+            context_before = 50
+            context_after = 50
+            snippet_start = max(0, start_idx - context_before)
+            snippet_end = min(len(chunk.text), start_idx + len(normalized_query) + context_after)
+            snippet = chunk.text[snippet_start:snippet_end]
+
+            if snippet_start > 0:
+                snippet = "..." + snippet
+            if snippet_end < len(chunk.text):
+                snippet = snippet + "..."
+        else:
+            matched_text = normalized_query
+            snippet = chunk.text[:100]
+            if len(chunk.text) > 100:
+                snippet += "..."
+
+        matches.append(
+            schemas.CrossDocumentSearchMatch(
+                document_id=chunk.document_id,
+                document_title=doc_title,
+                page=chunk.page or 0,
+                paragraph_index=chunk.paragraph_index or 0,
+                text=chunk.text,
+                snippet=snippet,
+                matched_text=matched_text,
+            )
+        )
+
+    return schemas.CrossDocumentSearchResponse(
+        query=normalized_query,
+        total_matches=len(matches),
+        total_documents=len(unique_documents),
+        matches=matches,
+    )
+
+
+@router.get("/{document_id}", response_model=schemas.DocumentRead)
+def get_document(
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    doc_service = _doc_service(db)
+    document = _get_document_or_404(doc_service, document_id)
+    return document
+
+
+@router.put("/{document_id}", response_model=schemas.DocumentRead)
+def update_document(
+    document_id: str,
+    payload: schemas.DocumentUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    doc_service = _doc_service(db)
+    metadata_service = _metadata_service(db)
+    document = _get_document_or_404(doc_service, document_id)
+
+    if payload.metadata is not None:
+        doc_service.validate_metadata(payload.metadata, metadata_service.list_required_fields())
+
+    # Validate and get classification category
+    classification = ClassificationValidator.get_active_or_none(db, payload.classification_id)
+
+    updated = doc_service.update(
+        document,
+        title=payload.title,
+        content=payload.content,
+        metadata=payload.metadata,
+        classification=classification,
+        pdf_temp_path=payload.source_pdf_path,
+    )
+    return updated
+
+
+@router.put("/{document_id}/metadata", response_model=schemas.DocumentRead)
+def update_document_metadata(
+    document_id: str,
+    payload: schemas.DocumentMetadataUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    doc_service = _doc_service(db)
+    metadata_service = _metadata_service(db)
+    document = _get_document_or_404(doc_service, document_id)
+
+    metadata = dict(document.metadata_data or {})
+    if payload.metadata:
+        metadata.update(payload.metadata)
+
+    keywords = metadata.get("keywords")
+    if payload.add_keywords:
+        if not isinstance(keywords, list):
+            if keywords is None:
+                keywords = []
+            elif isinstance(keywords, str):
+                keywords = [keywords]
+            else:
+                keywords = []
+        for kw in payload.add_keywords:
+            if kw not in keywords:
+                keywords.append(kw)
+        metadata["keywords"] = keywords
+
+    if payload.remove_keywords and isinstance(keywords, list):
+        metadata["keywords"] = [kw for kw in keywords if kw not in payload.remove_keywords]
+
+    doc_service.validate_metadata(metadata, metadata_service.list_required_fields())
+    updated = doc_service.update(document, metadata=metadata)
+    return updated
+
+
+@router.post("/{document_id}/classify", response_model=schemas.DocumentRead)
+def classify_document(
+    document_id: str,
+    payload: schemas.DocumentClassificationApply,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    doc_service = _doc_service(db)
+    document = _get_document_or_404(doc_service, document_id)
+
+    # Validate and get classification category
+    classification = ClassificationValidator.get_active_or_404(db, payload.classification_id)
+
+    updated = doc_service.apply_classification(document, classification=classification)
+    return updated
+
+
+@router.post("/upload/", response_model=schemas.DocumentUploadResponse)
+async def upload_pdf_for_extraction(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if file.content_type not in {"application/pdf", "application/octet-stream"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only PDF files are supported")
+
+    pdf_bytes = await file.read()
+    FileValidator.validate_pdf_not_empty(pdf_bytes)
+
+    temp_dir = Path(settings.PDF_TEMP_DIR)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_filename = f"{uuid.uuid4()}.pdf"
+    temp_path = temp_dir / temp_filename
+    temp_path.write_bytes(pdf_bytes)
+
+    try:
+        try:
+            text, segments = extract_text_and_segments(pdf_bytes)
+        except PDFPasswordIncorrect:
+            temp_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="PDF 檔案已加密，請提供未加密版本")
+
+        # 檢測圖片型 PDF（掃描件、傳真件）
+        text_length = len(text.strip()) if text else 0
+        is_image_based = text_length < 100  # 文字量少於 100 字視為圖片型 PDF
+
+        if is_image_based:
+            # 圖片型 PDF：獲取頁數並返回特殊響應
+            try:
+                total_pages = get_pdf_page_count(str(temp_path))
+            except Exception:
+                total_pages = None
+
+            logger.info(f"Detected image-based PDF: {file.filename}, pages: {total_pages}, text_length: {text_length}")
+
+            return schemas.DocumentUploadResponse(
+                filename=file.filename or "uploaded.pdf",
+                text=text or "",  # 可能有少量文字
+                segments=[],  # 圖片型 PDF 沒有有效的文字段落
+                suggested_metadata={},
+                suggestion=schemas.AISuggestion(),  # 空的建議
+                pdf_temp_path=str(temp_path),
+                is_image_based=True,
+                total_pages=total_pages,
+            )
+
+        if len(text) > 20000:
+            text = text[:20000]
+
+        metadata_service = _metadata_service(db)
+        metadata_fields = metadata_service.list_fields(active_only=True)
+
+        classifications = _list_active_classifications(db)
+        classification_prompt = []
+        for category in classifications:
+            label = category.name
+            if category.code:
+                label = f"{category.name} ({category.code})"
+            classification_prompt.append(label)
+
+        project_field = _find_metadata_field(metadata_service, "project_id", metadata_fields)
+        project_prompt = []
+        project_options = getattr(project_field, "options", []) if project_field else []
+        for option in project_options:
+            label = option.display_value or option.value
+            if option.display_value and option.value and option.display_value.lower() != option.value.lower():
+                label = f"{option.display_value} ({option.value})"
+            project_prompt.append(label)
+
+        try:
+            suggestion_payload = ai.generate_document_suggestion(
+                text=text,
+                classifications=classification_prompt,
+                projects=project_prompt,
+                segments=[segment.model_dump() for segment in segments],
+            )
+        except Exception as exc:  # pragma: no cover - external API failure handling
+            logger.warning("Gemini suggestion request failed: %s", exc)
+            suggestion_payload = {}
+
+        suggestion = schemas.AISuggestion(**(suggestion_payload or {}))
+
+        keyword_candidates: List[str] = []
+        if suggestion.keywords:
+            keyword_candidates.extend(suggestion.keywords)
+        keyword_candidates.extend(suggest_keywords(text))
+
+        merged_keywords: List[str] = []
+        seen_keywords = set()
+        for keyword in keyword_candidates:
+            if not keyword:
+                continue
+            normalized = keyword.lower()
+            if normalized in seen_keywords:
+                continue
+            seen_keywords.add(normalized)
+            merged_keywords.append(keyword)
+
+        suggested_metadata: Dict[str, object] = {"keywords": merged_keywords}
+
+        file_type_field = _find_metadata_field(metadata_service, "file_type", metadata_fields)
+        if file_type_field:
+            matched_file_type = _match_option_value(getattr(file_type_field, "options", []), suggestion.metadata.get("file_type"))
+            if matched_file_type:
+                suggested_metadata["file_type"] = matched_file_type
+
+        if project_field:
+            matched_project = (
+                _match_option_value(project_options, suggestion.metadata.get("project_id"))
+                or _match_option_value(project_options, suggestion.project)
+            )
+            if matched_project:
+                suggested_metadata["project_id"] = matched_project
+
+        return schemas.DocumentUploadResponse(
+            filename=file.filename or "uploaded.pdf",
+            text=text,
+            segments=segments,
+            suggested_metadata=suggested_metadata,
+            suggestion=suggestion,
+            pdf_temp_path=str(temp_path),
+        )
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+        raise
+
+
+@router.get("/{document_id}/pdf")
+def download_document_pdf(
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    doc_service = _doc_service(db)
+    document = _get_document_or_404(doc_service, document_id)
+
+    if not document.pdf_path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PDF 尚未上傳或已被移除")
+
+    # Security: Validate file path to prevent path traversal attacks
+    # Ensure the file is within the storage directory
+    validated_path = validate_file_path(
+        file_path=document.pdf_path,
+        base_dir=settings.FILE_STORAGE_DIR
+    )
+
+    # Use document title for the download filename
+    # Sanitize title to ensure it's a valid filename
+    safe_title = "".join(c for c in document.title if c.isalnum() or c in (' ', '.', '_', '-')).strip()
+    if not safe_title:
+        safe_title = f"document_{document_id}"
+    
+    download_filename = f"{safe_title}.pdf"
+
+    return FileResponse(validated_path, media_type="application/pdf", filename=download_filename)
+
+
+@router.delete("/{document_id}/history", status_code=status.HTTP_204_NO_CONTENT)
+def clear_document_history(
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """清除文件的 AI 對話歷史"""
+    doc_service = _doc_service(db)
+    document = _get_document_or_404(doc_service, document_id)
+
+    if document.full_analysis and "conversation_history" in document.full_analysis:
+        # Keep other analysis data, just clear conversation history
+        current = document.full_analysis
+        current["conversation_history"] = []
+        document.full_analysis = current
+        
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(document, "full_analysis")
+        
+        db.add(document)
+        db.commit()
+    
+    return None
+
+
+
+
+
+# ===== Document Notes =====
+
+@router.post("/{document_id}/notes", response_model=schemas.DocumentNoteRead)
+def create_document_note(
+    document_id: str,
+    payload: schemas.DocumentNoteCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """新增文件筆記"""
+    doc_service = _doc_service(db)
+    document = _get_document_or_404(doc_service, document_id)
+    
+    note = models.DocumentNote(
+        document_id=document.id,
+        question=payload.question,
+        answer=payload.answer
+    )
+    db.add(note)
+    db.commit()
+    db.refresh(note)
+    return note
+
+
+@router.get("/{document_id}/notes", response_model=List[schemas.DocumentNoteRead])
+def list_document_notes(
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """列出文件筆記"""
+    doc_service = _doc_service(db)
+    _get_document_or_404(doc_service, document_id)
+    
+    notes = db.query(models.DocumentNote).filter(
+        models.DocumentNote.document_id == document_id
+    ).order_by(models.DocumentNote.created_at.desc()).all()
+    return notes
+
+
+@router.put("/{document_id}/notes/{note_id}", response_model=schemas.DocumentNoteRead)
+def update_document_note(
+    document_id: str,
+    note_id: str,
+    payload: schemas.DocumentNoteUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """更新文件筆記"""
+    note = db.query(models.DocumentNote).filter(
+        models.DocumentNote.id == note_id,
+        models.DocumentNote.document_id == document_id
+    ).first()
+    
+    if not note:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="筆記不存在")
+        
+    if payload.question is not None:
+        note.question = payload.question
+    if payload.answer is not None:
+        note.answer = payload.answer
+        
+    db.commit()
+    db.refresh(note)
+    return note
+
+
+@router.delete("/{document_id}/notes/{note_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_document_note(
+    document_id: str,
+    note_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """刪除文件筆記"""
+    note = db.query(models.DocumentNote).filter(
+        models.DocumentNote.id == note_id,
+        models.DocumentNote.document_id == document_id
+    ).first()
+    
+    if not note:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="筆記不存在")
+        
+    db.delete(note)
+    db.commit()
+    return None
+
+
+@router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_document(
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """刪除文件及其相關資料（chunks、向量、PDF 檔案）"""
+    doc_service = _doc_service(db)
+    document = _get_document_or_404(doc_service, document_id)
+
+    # 執行刪除
+    doc_service.delete(document)
+    return None
+
+
+@router.post("/{document_id}/re-vectorize", response_model=schemas.DocumentRead)
+def re_vectorize_document(
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    重新向量化文件
+
+    只重新生成向量嵌入，不重新提取 PDF 文字內容
+    適用於：清空向量值後重建、切換 embedding 模型
+    """
+    doc_service = _doc_service(db)
+    document = _get_document_or_404(doc_service, document_id)
+
+    try:
+        # 只重新生成 embeddings，不重新提取 PDF 文字
+        doc_service._re_embed_existing_chunks(document)
+        db.refresh(document, attribute_names=["classification", "chunks"])
+        logger.info(f"文件 {document_id} 已重新向量化（共 {len(document.chunks)} 個向量塊）")
+
+        return schemas.DocumentRead(
+            id=document.id,
+            title=document.title,
+            content=document.content,
+            metadata_data=document.metadata_data or {},
+            classification=schemas.ClassificationSummary(
+                id=document.classification.id,
+                name=document.classification.name,
+                code=document.classification.code,
+            ) if document.classification else None,
+            creator_id=document.creator_id,
+            created_at=document.created_at,
+            updated_at=document.updated_at,
+            is_archived=document.is_archived,
+            pdf_path=document.pdf_path,
+            ai_summary=document.ai_summary,
+        )
+    except ValueError as exc:
+        # 沒有現有的 chunks
+        logger.error(f"重新向量化失敗：{exc}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc)
+        )
+    except Exception as exc:
+        logger.error(f"重新向量化失敗：{exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"重新向量化失敗：{str(exc)}"
+        )
+
+
+@router.get("/{document_id}/search-text", response_model=schemas.TextSearchResponse)
+def search_document_text(
+    document_id: str,
+    q: str = Query(..., min_length=1, description="搜尋關鍵字"),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    在文件中搜尋文字（全文檢索）
+
+    支援：
+    - 大小寫不敏感
+    - 忽略多餘空格
+    - 返回匹配的頁碼和上下文
+    """
+    doc_service = _doc_service(db)
+    document = _get_document_or_404(doc_service, document_id)
+
+    # 正規化搜尋關鍵字（移除多餘空格）
+    normalized_query = " ".join(q.strip().split())
+
+    if not normalized_query:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="搜尋關鍵字不可為空"
+        )
+
+    # 查詢 DocumentChunk，使用大小寫不敏感搜尋
+    chunks = (
+        db.query(models.DocumentChunk)
+        .filter(
+            models.DocumentChunk.document_id == document_id,
+            func.lower(models.DocumentChunk.text).contains(func.lower(normalized_query))
+        )
+        .order_by(models.DocumentChunk.page, models.DocumentChunk.paragraph_index)
+        .all()
+    )
+
+    # 構建搜尋結果
+    matches = []
+    for chunk in chunks:
+        # 找出匹配的文字片段（用於高亮）
+        text_lower = chunk.text.lower()
+        query_lower = normalized_query.lower()
+        start_idx = text_lower.find(query_lower)
+
+        if start_idx != -1:
+            # 提取匹配的原始文字（保留大小寫）
+            matched_text = chunk.text[start_idx:start_idx + len(normalized_query)]
+
+            # 生成摘錄：關鍵字前後各 50 字
+            context_before = 50
+            context_after = 50
+
+            snippet_start = max(0, start_idx - context_before)
+            snippet_end = min(len(chunk.text), start_idx + len(normalized_query) + context_after)
+
+            snippet = chunk.text[snippet_start:snippet_end]
+
+            # 添加省略號
+            if snippet_start > 0:
+                snippet = "..." + snippet
+            if snippet_end < len(chunk.text):
+                snippet = snippet + "..."
+        else:
+            # 如果找不到精確匹配（可能因為空格），就用整段文字
+            matched_text = normalized_query
+            # 截取前 100 字作為摘錄
+            snippet = chunk.text[:100]
+            if len(chunk.text) > 100:
+                snippet += "..."
+
+        matches.append(
+            schemas.TextSearchMatch(
+                page=chunk.page or 0,
+                paragraph_index=chunk.paragraph_index or 0,
+                text=chunk.text,
+                snippet=snippet,
+                matched_text=matched_text,
+            )
+        )
+
+    return schemas.TextSearchResponse(
+        query=normalized_query,
+        total_matches=len(matches),
+        matches=matches,
+    )
+
+
+@router.get("/{document_id}/page/{page_number}/text")
+def get_page_text(
+    document_id: str,
+    page_number: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    獲取指定頁面的文字內容
+
+    從 document_chunks 合併查詢（僅支持普通 PDF）
+    圖片型 PDF 不提供文字內容
+    """
+    doc_service = _doc_service(db)
+    document = _get_document_or_404(doc_service, document_id)
+
+    # 檢查是否為圖片型 PDF
+    if document.is_image_based:
+        return {
+            "page": page_number,
+            "text": "",
+            "source": "image_based",  # 標記為圖片型 PDF
+            "message": "圖片型 PDF 不提供文字內容，僅支持預覽"
+        }
+
+    # 查詢 chunks（普通 PDF）
+    chunks = (
+        db.query(models.DocumentChunk)
+        .filter(
+            models.DocumentChunk.document_id == document_id,
+            models.DocumentChunk.page == page_number
+        )
+        .order_by(models.DocumentChunk.paragraph_index)
+        .all()
+    )
+
+    if not chunks:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"第 {page_number} 頁沒有文字內容"
+        )
+
+    # 合併所有 chunks 的文字
+    full_text = "\n\n".join(chunk.text for chunk in chunks if chunk.text)
+
+    return {
+        "page": page_number,
+        "text": full_text,
+        "source": "chunks"  # 標記文字來源
+    }
+
+
+@router.post("/{document_id}/ocr/process")
+def process_document_ocr(
+    document_id: str,
+    request: schemas.OCRProcessRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    圖片型 PDF 處理 - 僅支持預覽模式
+
+    此功能已簡化：圖片型 PDF 僅提供預覽功能，不執行 OCR 識別
+    請確保填寫必要的 metadata 後保存文件
+    """
+    logger.info(f"收到圖片型 PDF 處理請求：文件 ID={document_id}，用戶={current_user.username}")
+
+    doc_service = _doc_service(db)
+    document = _get_document_or_404(doc_service, document_id)
+
+    # 檢查是否為圖片型 PDF
+    if not document.is_image_based:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="此文件不是圖片型 PDF"
+        )
+
+    # 標記為 skipped（僅供預覽）
+    document.ocr_status = "skipped"
+    db.commit()
+
+    return schemas.OCRStatusResponse(
+        document_id=document.id,
+        ocr_status="skipped",
+        is_image_based=True,
+        message="圖片型 PDF 僅支持預覽功能，請確保已填寫必要的 metadata 後保存"
+    )
+
+
+@router.get("/{document_id}/ocr/status", response_model=schemas.OCRStatusResponse)
+def get_ocr_status(
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    查詢文件的 OCR 處理狀態
+    """
+    doc_service = _doc_service(db)
+    document = _get_document_or_404(doc_service, document_id)
+
+    # 計算進度（如果正在處理中）
+    progress = None
+    if document.ocr_status == "processing":
+        # 目前是同步處理，無法精確追蹤進度
+        # 未來可透過背景任務系統提供精確進度
+        progress = 50
+    elif document.ocr_status == "completed":
+        progress = 100
+    elif document.ocr_status in ["pending", "not_needed", "skipped", "failed"]:
+        progress = 0
+
+    message = None
+    if document.ocr_status == "completed":
+        # 統計處理結果
+        chunk_count = db.query(func.count(models.DocumentChunk.id)).filter(
+            models.DocumentChunk.document_id == document_id
+        ).scalar()
+        message = f"OCR 完成，已建立 {chunk_count} 個文字段落"
+    elif document.ocr_status == "failed":
+        message = "OCR 處理失敗，請重試"
+    elif document.ocr_status == "skipped":
+        message = "已跳過 OCR 處理"
+    elif document.ocr_status == "processing":
+        message = "正在進行 OCR 識別..."
+    elif document.ocr_status == "pending":
+        message = "等待處理中..."
+
+    return schemas.OCRStatusResponse(
+        document_id=document.id,
+        ocr_status=document.ocr_status,
+        is_image_based=document.is_image_based,
+        ocr_method=document.ocr_method,
+        progress=progress,
+        message=message
+    )
