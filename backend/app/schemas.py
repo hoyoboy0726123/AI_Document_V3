@@ -178,6 +178,7 @@ class DocumentRead(DocumentBase):
     ocr_status: str = "not_needed"  # OCR處理狀態
     ocr_method: Optional[str] = None  # OCR方法
     full_analysis: Optional[Dict[str, Any]] = None  # 整份文件 AI 分析結果（包含初始分析和對話歷史）
+    task_id: Optional[str] = None  # 背景任務 ID（VL 解析時使用）
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 
@@ -525,3 +526,17 @@ class VectorHealthResponse(BaseModel):
     empty_embedding_count: int
     abnormal_chunks: List[AbnormalChunk]
     document_stats: List[DocumentChunkStat]
+
+
+# ── 背景任務 ──────────────────────────────────────────────────────────────────
+
+class TaskRead(BaseModel):
+    id: str
+    task_type: str
+    status: str  # pending / running / completed / failed
+    progress: int
+    message: Optional[str] = None
+    document_id: Optional[str] = None
+    error: Optional[str] = None
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)

@@ -414,7 +414,56 @@ class DocumentService:
 
         vector_store.add_embeddings(faiss_mapping)
 
+
+# ── 背景任務執行函式（獨立 DB Session）────────────────────────────────────────
+
+def run_vl_vectorize_task(task_id: str, document_id: str) -> None:
+    """
+    供 FastAPI BackgroundTasks 呼叫：用 VL 模型重新解析並向量化。
+    使用獨立 DB Session，不依賴請求生命週期。
+    """
+    from ..database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        task = db.query(models.BackgroundTask).filter_by(id=task_id).first()
+        document = db.query(models.Document).filter_by(id=document_id).first()
+
+        if not task or not document:
+            return
+
+        task.status = "running"
+        task.message = "正在使用 VL 視覺模型逐頁解析 PDF..."
+        db.commit()
+
+        service = DocumentService(db)
+        pdf_path = Path(document.pdf_path)
+
+        task.progress = 10
+        task.message = "正在載入 PDF 頁面..."
+        db.commit()
+
+        service._rebuild_document_chunks(document, pdf_path, segments=None, force_vision=True)
+
+        task.status = "completed"
+        task.progress = 100
+        task.message = "VL 解析與向量化完成"
+        db.commit()
+
+    except Exception as exc:
+        try:
+            task = db.query(models.BackgroundTask).filter_by(id=task_id).first()
+            if task:
+                task.status = "failed"
+                task.error = str(exc)[:500]
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
     def _re_embed_existing_chunks(self, document: models.Document) -> None:
+
         """
         重新向量化現有的 chunks，不重新提取 PDF 文字
 

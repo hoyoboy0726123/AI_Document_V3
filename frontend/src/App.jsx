@@ -14,11 +14,14 @@ import AdminPage from "./pages/AdminPage";
 import VectorSearchTestPage from "./pages/VectorSearchTestPage";
 import VectorHealthPage from "./pages/VectorHealthPage";
 import PrivateRoute from "./components/PrivateRoute";
+import { TaskStatusProvider } from "./contexts/TaskStatusContext";
+import TaskProgressBanner from "./components/TaskProgressBanner";
 
 function App() {
   return (
     <ConfigProvider locale={zhTW}>
       <AntdApp>
+        <TaskStatusProvider>
         <Router>
           <Routes>
             <Route path="/login" element={<LoginPage />} />
@@ -91,7 +94,9 @@ function App() {
               )}
             />
           </Routes>
+          <TaskProgressBanner />
         </Router>
+        </TaskStatusProvider>
       </AntdApp>
     </ConfigProvider>
   );

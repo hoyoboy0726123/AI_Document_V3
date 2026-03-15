@@ -1,0 +1,119 @@
+/**
+ * 右下角浮動顯示背景任務進度的 Banner
+ */
+import React from "react";
+import { Button, Card, Progress, Space, Tag, Typography } from "antd";
+import { CheckCircleOutlined, CloseOutlined, LoadingOutlined, WarningOutlined } from "@ant-design/icons";
+import { useNavigate } from "react-router-dom";
+import { useTaskStatus } from "../contexts/TaskStatusContext";
+
+const statusIcon = (status) => {
+  if (status === "completed") return <CheckCircleOutlined style={{ color: "#52c41a" }} />;
+  if (status === "failed") return <WarningOutlined style={{ color: "#ff4d4f" }} />;
+  return <LoadingOutlined style={{ color: "#1677ff" }} spin />;
+};
+
+const statusColor = (status) => {
+  if (status === "completed") return "success";
+  if (status === "failed") return "error";
+  return "processing";
+};
+
+const TaskProgressBanner = () => {
+  const navigate = useNavigate();
+  const { tasks, taskStatuses, removeTask } = useTaskStatus();
+
+  if (!tasks.length) return null;
+
+  return (
+    <div style={{
+      position: "fixed",
+      bottom: 24,
+      right: 24,
+      zIndex: 1000,
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      maxWidth: 340,
+    }}>
+      {tasks.map((entry) => {
+        const st = taskStatuses[entry.task_id];
+        const taskStatus = st?.status ?? "pending";
+        const progress = st?.progress ?? 0;
+        const message = st?.message ?? "等待開始...";
+        const isDone = taskStatus === "completed" || taskStatus === "failed";
+
+        return (
+          <Card
+            key={entry.task_id}
+            size="small"
+            style={{ boxShadow: "0 4px 12px rgba(0,0,0,0.15)", borderRadius: 8 }}
+            bodyStyle={{ padding: "10px 14px" }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+              <Space size={6}>
+                {statusIcon(taskStatus)}
+                <Typography.Text strong style={{ fontSize: 13 }}>
+                  VL 視覺解析
+                </Typography.Text>
+                <Tag color={statusColor(taskStatus)} style={{ fontSize: 11 }}>
+                  {taskStatus === "pending" ? "等待中" :
+                   taskStatus === "running" ? "進行中" :
+                   taskStatus === "completed" ? "完成" : "失敗"}
+                </Tag>
+              </Space>
+              {isDone && (
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<CloseOutlined />}
+                  onClick={() => removeTask(entry.task_id)}
+                  style={{ padding: 0, height: 20 }}
+                />
+              )}
+            </div>
+
+            {entry.document_title && (
+              <Typography.Text
+                type="secondary"
+                style={{ fontSize: 12, display: "block", marginBottom: 4 }}
+                ellipsis
+              >
+                {entry.document_title}
+              </Typography.Text>
+            )}
+
+            <Typography.Text style={{ fontSize: 12, display: "block", marginBottom: 6 }}>
+              {taskStatus === "failed" && st?.error ? st.error : message}
+            </Typography.Text>
+
+            {!isDone && (
+              <Progress
+                percent={progress}
+                size="small"
+                status="active"
+                style={{ marginBottom: 4 }}
+              />
+            )}
+
+            {isDone && entry.document_id && (
+              <Button
+                size="small"
+                type="link"
+                style={{ padding: 0, fontSize: 12 }}
+                onClick={() => {
+                  navigate(`/documents/${entry.document_id}`);
+                  if (taskStatus === "completed") removeTask(entry.task_id);
+                }}
+              >
+                前往文件 →
+              </Button>
+            )}
+          </Card>
+        );
+      })}
+    </div>
+  );
+};
+
+export default TaskProgressBanner;

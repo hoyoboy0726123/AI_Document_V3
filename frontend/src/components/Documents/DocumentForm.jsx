@@ -3,10 +3,12 @@ import { Alert, Button, Card, Checkbox, Form, Input, Modal, Radio, Select, Space
 import { InboxOutlined, PlusOutlined } from "@ant-design/icons";
 import apiClient from "../../services/api";
 import AISuggestionModal from "./AISuggestionModal";
+import { useTaskStatus } from "../../contexts/TaskStatusContext";
 
 const { Dragger } = Upload;
 
 const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
+  const { addTask } = useTaskStatus();
   const [form] = Form.useForm();
   const [metadataFields, setMetadataFields] = useState([]);
   const [classificationOptions, setClassificationOptions] = useState([]);
@@ -231,13 +233,21 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
         setProcessingStatus("正在更新文件...");
         await apiClient.put(`documents/${document.id}`, payload);
         message.success("文件已更新");
+      } else if (forceVision) {
+        // VL 模式：立刻建立文件，VL 解析在後台執行
+        setProcessingStatus("正在建立文件（VL 解析將在背景執行）...");
+        const resp = await apiClient.post("documents/", payload);
+        const taskId = resp.data?.task_id;
+        const docId = resp.data?.id;
+        const docTitle = resp.data?.title ?? payload.title;
+        if (taskId && docId) {
+          addTask({ task_id: taskId, document_id: docId, document_title: docTitle });
+          message.success("文件已建立，VL 視覺解析正在背景執行，可繼續使用系統");
+        } else {
+          message.success("文件已建立");
+        }
       } else {
-        // 建立文件時，顯示包含向量化的完整說明
-        setProcessingStatus(
-          forceVision
-            ? "正在使用視覺模型逐頁解析並建立向量索引，150 頁文件約需 30–60 分鐘，請耐心等候..."
-            : "正在建立文件並生成向量索引，這可能需要 10-30 秒，請稍候..."
-        );
+        setProcessingStatus("正在建立文件並生成向量索引，這可能需要 10-30 秒，請稍候...");
         await apiClient.post("documents/", payload);
         message.success("文件已建立，向量索引已完成");
       }
@@ -336,21 +346,22 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
     return false;
   };
 
-  const handleApplySuggestion = async () => {
-    if (!suggestionState?.suggestion) {
+  const handleApplySuggestion = async (editedSuggestion) => {
+    const suggestion = editedSuggestion ?? suggestionState?.suggestion;
+    if (!suggestion) {
       setSuggestionVisible(false);
       return;
     }
 
-    const { suggestion, suggestedMetadata } = suggestionState;
+    const { suggestedMetadata } = suggestionState ?? {};
     const currentMetadata = form.getFieldValue("metadata") || {};
     const nextMetadata = { ...currentMetadata };
 
+    // 使用用戶在 Modal 中可能修改過的 keywords
     const mergedKeywords = Array.from(
       new Set([
         ...(Array.isArray(currentMetadata.keywords) ? currentMetadata.keywords : []),
         ...(Array.isArray(suggestion.keywords) ? suggestion.keywords : []),
-        ...(Array.isArray(suggestedMetadata?.keywords) ? suggestedMetadata.keywords : []),
       ]),
     );
     if (mergedKeywords.length) {
@@ -410,6 +421,13 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
     }
 
     form.setFieldsValue(updates);
+    // 把用戶編輯後的 summary 寫回 state，讓 handleSubmit 能取到最新值
+    if (editedSuggestion?.summary !== undefined) {
+      setSuggestionState((prev) => ({
+        ...prev,
+        suggestion: { ...prev.suggestion, summary: editedSuggestion.summary },
+      }));
+    }
     setSuggestionVisible(false);
     message.success("已套用 AI 建議，請確認內容後再儲存文件");
   };

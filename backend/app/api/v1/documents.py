@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -15,7 +15,7 @@ from ...core.config import settings
 from ...core.security import get_current_user
 from ...database import get_db
 from ...services import ai
-from ...services.documents import DocumentService
+from ...services.documents import DocumentService, run_vl_vectorize_task
 from ...services.metadata import MetadataService
 from ...services.pdf_processing import extract_text_and_segments, suggest_keywords
 from ...services.pdf_image import get_pdf_page_count
@@ -229,6 +229,7 @@ def accept_suggestion_recommendations(
 @router.post("/", response_model=schemas.DocumentRead, status_code=status.HTTP_201_CREATED)
 def create_document(
     payload: schemas.DocumentCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -244,6 +245,46 @@ def create_document(
 
     logger.info(f"開始創建文件：分類={classification.name if classification else 'None'}，metadata={payload.metadata}")
 
+    # force_vision：建立文件記錄後立刻返回，VL 解析以背景任務執行
+    if payload.force_vision and payload.source_pdf_path:
+        document = doc_service.create(
+            title=payload.title,
+            content=payload.content,
+            metadata=payload.metadata,
+            creator=current_user,
+            classification=classification,
+            pdf_temp_path=payload.source_pdf_path,
+            segments=None,
+            ai_summary=payload.ai_summary,
+            is_image_based=payload.is_image_based,
+            original_filename=payload.original_filename,
+            force_vision=False,  # 不在這裡做 VL，交給背景任務
+        )
+
+        # 建立背景任務記錄
+        bg_task = models.BackgroundTask(
+            task_type="vl_vectorize",
+            status="pending",
+            progress=0,
+            message="等待 VL 解析開始...",
+            document_id=document.id,
+            creator_id=current_user.id,
+        )
+        db.add(bg_task)
+        db.commit()
+        db.refresh(bg_task)
+
+        # 啟動背景任務
+        background_tasks.add_task(run_vl_vectorize_task, task_id=bg_task.id, document_id=document.id)
+
+        logger.info(f"VL 背景任務已啟動：task_id={bg_task.id}，document_id={document.id}")
+
+        # 把 task_id 附在回應中（DocumentRead 有 task_id 欄位）
+        result = schemas.DocumentRead.model_validate(document)
+        result.task_id = bg_task.id
+        return result
+
+    # 一般路徑（同步向量化）
     document = doc_service.create(
         title=payload.title,
         content=payload.content,

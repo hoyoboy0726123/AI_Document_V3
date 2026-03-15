@@ -17,7 +17,7 @@ setup_logging(
 )
 logger = get_logger(__name__)
 
-from .api.v1 import admin, auth, documents, metadata, rag, vector_search
+from .api.v1 import admin, auth, documents, metadata, rag, tasks, vector_search
 from .core.config import settings
 from .database import SessionLocal, engine
 from .services import users as user_service
@@ -91,6 +91,9 @@ def ensure_schema_updates() -> None:
                             text("UPDATE document_chunks SET faiss_id = :faiss WHERE id = :chunk_id"),
                             {"faiss": index, "chunk_id": chunk_id},
                         )
+
+        # background_tasks 資料表（由 SQLAlchemy create_all 建立，但需確認欄位）
+        # 此表在第一次啟動時由 create_all 自動建立，無需手動 ALTER
 
         logger.info("Schema updates completed successfully")
 
@@ -166,6 +169,7 @@ app.include_router(admin.router, prefix="/api/v1/admin", tags=["Admin"])
 app.include_router(metadata.router, prefix="/api/v1", tags=["Metadata"])
 app.include_router(rag.router, prefix="/api/v1/rag", tags=["RAG"])
 app.include_router(vector_search.router, prefix="/api/v1/vector-search", tags=["VectorSearch"])
+app.include_router(tasks.router, prefix="/api/v1/tasks", tags=["Tasks"])
 
 
 @app.get("/")
