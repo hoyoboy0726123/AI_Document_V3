@@ -28,7 +28,7 @@ const KeywordList = ({ keywords }) => {
     return '-';
   }
 
-  if (keywords.length <= 2) {
+  if (keywords.length <= 3) {
     return (
       <Space wrap>
         {keywords.map((kw) => (
@@ -60,7 +60,7 @@ const KeywordList = ({ keywords }) => {
 
   return (
     <Space wrap>
-      {keywords.slice(0, 2).map((kw) => (
+      {keywords.slice(0, 3).map((kw) => (
         <Tag key={kw}>{kw}</Tag>
       ))}
       <Tag
@@ -70,7 +70,7 @@ const KeywordList = ({ keywords }) => {
           setExpanded(true);
         }}
       >
-        +{keywords.length - 2}
+        +{keywords.length - 3}
       </Tag>
     </Space>
   );

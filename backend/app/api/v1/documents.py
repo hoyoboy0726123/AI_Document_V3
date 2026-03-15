@@ -474,6 +474,7 @@ def update_document(
         title=payload.title,
         content=payload.content,
         metadata=payload.metadata,
+        ai_summary=payload.ai_summary,
         classification=classification,
         pdf_temp_path=payload.source_pdf_path,
     )

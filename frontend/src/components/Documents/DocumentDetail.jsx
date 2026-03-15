@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Button, Card, Descriptions, Space, Tag, message, Modal, Input, Tabs, Table, Typography, Statistic, Row, Col, Tooltip, Badge, Popconfirm, Slider } from "antd";
-import { FilePdfOutlined, ExclamationCircleOutlined, EditOutlined, DeleteOutlined, BookOutlined, PlusOutlined, DatabaseOutlined, ReloadOutlined, MergeCellsOutlined, ScissorOutlined } from "@ant-design/icons";
+import { FilePdfOutlined, ExclamationCircleOutlined, EditOutlined, DeleteOutlined, BookOutlined, PlusOutlined, DatabaseOutlined, ReloadOutlined, MergeCellsOutlined, ScissorOutlined, TagOutlined } from "@ant-design/icons";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import remarkGfm from "remark-gfm";
@@ -38,6 +38,10 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
   const [splittingChunk, setSplittingChunk] = useState(null);
   const [splitAt, setSplitAt] = useState(0);
   const [splitting, setSplitting] = useState(false);
+  const [prefixModalVisible, setPrefixModalVisible] = useState(false);
+  const [prefixText, setPrefixText] = useState("");
+  const [prefixTargetChunk, setPrefixTargetChunk] = useState(null); // null = 批次模式
+  const [prefixSaving, setPrefixSaving] = useState(false);
 
   const fetchDocument = async () => {
     if (!documentId) return;
@@ -266,6 +270,34 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
     }
   };
 
+  const handleApplyPrefix = async () => {
+    if (!prefixText.trim()) { message.warning("請輸入前綴文字"); return; }
+    const targets = prefixTargetChunk
+      ? [prefixTargetChunk]
+      : (chunks?.items ?? []).filter((c) => selectedChunkIds.includes(c.id));
+    if (!targets.length) { message.warning("沒有選取到向量塊"); return; }
+    try {
+      setPrefixSaving(true);
+      await Promise.all(
+        targets.map((chunk) =>
+          apiClient.put(`documents/${documentId}/chunks/${chunk.id}`, {
+            text: prefixText.trim() + "\n" + chunk.text,
+          })
+        )
+      );
+      message.success(`已為 ${targets.length} 個向量塊加入前綴並重新向量化`);
+      setPrefixModalVisible(false);
+      setPrefixText("");
+      setPrefixTargetChunk(null);
+      setSelectedChunkIds([]);
+      fetchChunks();
+    } catch (error) {
+      message.error(error.response?.data?.detail ?? "加入前綴失敗");
+    } finally {
+      setPrefixSaving(false);
+    }
+  };
+
   const scoreColor = (score) => {
     if (score >= 0.8) return "#52c41a";
     if (score >= 0.5) return "#faad14";
@@ -328,8 +360,16 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
                 <Tag>尚未分類</Tag>
               )}
             </Descriptions.Item>
+            {document.ai_summary && (
+              <Descriptions.Item label="AI 摘要">
+                <Typography.Text style={{ whiteSpace: "pre-wrap" }}>{document.ai_summary}</Typography.Text>
+              </Descriptions.Item>
+            )}
             {metadataEntries.map(([key, value]) => (
-              <Descriptions.Item label={key} key={key}>
+              <Descriptions.Item
+                label={{ keywords: "關鍵字", file_type: "文件類型", project_id: "專案" }[key] ?? key}
+                key={key}
+              >
                 {Array.isArray(value) ? (
                   <Space wrap>
                     {value.map((item) => (
@@ -476,6 +516,15 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
                         <Space style={{ marginTop: 24 }} wrap>
                           <Button icon={<ReloadOutlined />} onClick={fetchChunks} loading={chunksLoading}>重新載入</Button>
                           <Button type="primary" icon={<PlusOutlined />} onClick={() => setAddChunkVisible(true)}>新增手動塊</Button>
+                          {selectedChunkIds.length >= 1 && (
+                            <Button
+                              icon={<TagOutlined />}
+                              onClick={() => { setPrefixTargetChunk(null); setPrefixText(""); setPrefixModalVisible(true); }}
+                              style={{ background: "#13c2c2", color: "#fff", borderColor: "#13c2c2" }}
+                            >
+                              批次前綴 ({selectedChunkIds.length}) 塊
+                            </Button>
+                          )}
                           {selectedChunkIds.length >= 2 && (
                             <Button
                               icon={<MergeCellsOutlined />}
@@ -542,6 +591,13 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
                         width: 140,
                         render: (_, record) => (
                           <Space>
+                            <Tooltip title="加入前綴並重新向量化">
+                              <Button
+                                size="small"
+                                icon={<TagOutlined />}
+                                onClick={() => { setPrefixTargetChunk(record); setPrefixText(""); setPrefixModalVisible(true); }}
+                              />
+                            </Tooltip>
                             <Tooltip title="編輯並重新向量化">
                               <Button
                                 size="small"
@@ -684,6 +740,59 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
             />
             <Typography.Text type="secondary">{newChunk.text.length} 字</Typography.Text>
           </div>
+        </Modal>
+
+        {/* 加入前綴 Modal */}
+        <Modal
+          title={prefixTargetChunk ? `加入前綴 — 向量塊 #${prefixTargetChunk.chunk_index}` : `批次加入前綴（${selectedChunkIds.length} 塊）`}
+          open={prefixModalVisible}
+          onOk={handleApplyPrefix}
+          onCancel={() => { setPrefixModalVisible(false); setPrefixText(""); setPrefixTargetChunk(null); }}
+          confirmLoading={prefixSaving}
+          okText="套用並重新向量化"
+          cancelText="取消"
+          width={700}
+        >
+          <div style={{ marginBottom: 12 }}>
+            <Typography.Text strong>前綴文字：</Typography.Text>
+            <Input.TextArea
+              rows={3}
+              value={prefixText}
+              onChange={(e) => setPrefixText(e.target.value)}
+              placeholder="輸入要加在向量塊開頭的文字，例如：測試項目名稱：XXX"
+              style={{ marginTop: 4, fontFamily: "monospace", fontSize: 13 }}
+              autoFocus
+            />
+          </div>
+          {prefixText.trim() && (
+            <div>
+              <Typography.Text type="secondary" style={{ display: "block", marginBottom: 4 }}>
+                套用後預覽（{prefixTargetChunk ? "此塊" : "以第一塊為例"}）：
+              </Typography.Text>
+              <div style={{
+                background: "#f6ffed", border: "1px solid #b7eb8f", borderRadius: 4,
+                padding: "8px 12px", fontFamily: "monospace", fontSize: 12,
+                whiteSpace: "pre-wrap", wordBreak: "break-word",
+                maxHeight: 200, overflowY: "auto",
+              }}>
+                <span style={{ color: "#389e0d", fontWeight: 600 }}>{prefixText.trim()}</span>
+                {"\n"}
+                <span style={{ color: "#595959" }}>
+                  {(() => {
+                    const sample = prefixTargetChunk
+                      ? prefixTargetChunk.text
+                      : (chunks?.items ?? []).find((c) => selectedChunkIds.includes(c.id))?.text ?? "";
+                    return sample.length > 300 ? sample.slice(0, 300) + "…" : sample;
+                  })()}
+                </span>
+              </div>
+              {!prefixTargetChunk && selectedChunkIds.length > 1 && (
+                <Typography.Text type="secondary" style={{ fontSize: 12, marginTop: 4, display: "block" }}>
+                  此前綴將套用至所有 {selectedChunkIds.length} 個選取的向量塊
+                </Typography.Text>
+              )}
+            </div>
+          )}
         </Modal>
 
           {/* Edit Note Modal */}

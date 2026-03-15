@@ -62,7 +62,25 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
     fetchClassifications();
   }, []);
 
+  useEffect(() => {
+    if (isEdit && document) {
+      form.setFieldsValue({
+        title: document.title,
+        ai_summary: document.ai_summary ?? "",
+        metadata: {
+          ...(document.metadata ?? {}),
+          keywords: document.metadata?.keywords ?? [],
+        },
+        classification_id: document.classification?.id ?? null,
+        source_pdf_path: null,
+      });
+    } else {
+      form.resetFields();
+    }
+  }, [document, isEdit, form]);
+
   // 從 banner「前往填寫表單」按鈕跳轉過來時，帶入分析結果
+  // 必須在 isEdit effect 之後，避免 resetFields() 覆蓋帶入的值
   useEffect(() => {
     const result = location.state?.uploadResult;
     if (!result || isEdit) return;
@@ -71,20 +89,6 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
     applyUploadResult(result);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  useEffect(() => {
-    if (isEdit && document) {
-      form.setFieldsValue({
-        title: document.title,
-        // content 欄位已移除，不需要設置
-        metadata: document.metadata ?? {},
-        classification_id: document.classification?.id ?? null,
-        source_pdf_path: null,
-      });
-    } else {
-      form.resetFields();
-    }
-  }, [document, isEdit, form]);
 
   const metadataInitialValues = useMemo(() => {
     if (isEdit && document?.metadata) {
@@ -216,10 +220,14 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
       return;
     }
 
+    // form.getFieldValue("metadata") 包含 setFieldsValue 設定的值（AI 建議）
+    // values.metadata 只包含有 Form.Item 的欄位；合併以確保 AI 建議的關鍵字等不會丟失
+    const storedMetadata = form.getFieldValue("metadata") || {};
     const payload = {
       title: values.title,
-      content: values.content || null,  // 使用 upload 時提取的 text
-      metadata: values.metadata,
+      content: values.content || null,
+      metadata: { ...storedMetadata, ...(values.metadata || {}) },
+      ai_summary: values.ai_summary || undefined,
     };
 
     if (values.classification_id) {
@@ -469,9 +477,11 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
     if (projectValue) {
       updates.metadata.project_id = projectValue;
     }
+    if (editedSuggestion?.summary !== undefined) {
+      updates.ai_summary = editedSuggestion.summary;
+    }
 
     form.setFieldsValue(updates);
-    // 把用戶編輯後的 summary 寫回 state，讓 handleSubmit 能取到最新值
     if (editedSuggestion?.summary !== undefined) {
       setSuggestionState((prev) => ({
         ...prev,
@@ -655,6 +665,21 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
         <Form.Item name="source_pdf_path" hidden>
           <Input type="hidden" />
         </Form.Item>
+
+        <Form.Item name="ai_summary" label="AI 摘要">
+          <Input.TextArea rows={4} placeholder="AI 自動生成的文件摘要（可手動修改）" />
+        </Form.Item>
+
+        {/* 關鍵字：若 metadata fields 系統未定義 keywords 欄位，則顯示此直接欄位 */}
+        {!metadataFields.some((f) => f.name === "keywords") && (
+          <Form.Item name={["metadata", "keywords"]} label="關鍵字">
+            <Select
+              mode="tags"
+              placeholder="輸入關鍵字後按 Enter 新增"
+              tokenSeparators={[","]}
+            />
+          </Form.Item>
+        )}
 
         {metadataFields.map((field) => renderMetadataField(field))}
 

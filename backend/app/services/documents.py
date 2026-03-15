@@ -117,6 +117,7 @@ class DocumentService:
         title: Optional[str] = None,
         content: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        ai_summary: Optional[str] = None,
         classification: Optional[models.ClassificationCategory] = None,
         pdf_temp_path: Optional[str] = None,
     ) -> models.Document:
@@ -126,6 +127,8 @@ class DocumentService:
             document.content = content
         if metadata is not None:
             document.metadata_data = metadata or {}
+        if ai_summary is not None:
+            document.ai_summary = ai_summary
         if classification is not None:
             document.classification_id = classification.id
         self.db.commit()
