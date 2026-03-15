@@ -1,7 +1,10 @@
 import base64
+import io
 import json
 import logging
 from typing import Any, Dict, List, Optional
+
+from PIL import Image
 
 from ..core.config import settings
 from .ollama_client import get_client
@@ -76,12 +79,18 @@ def _chat_with_ollama(
     model: Optional[str] = None,
     response_format: Optional[Any] = None,
 ) -> str:
+    import time
     client = get_client()
-    return client.chat(
+    t0 = time.time()
+    result = client.chat(
         messages,
         model=model or settings.OLLAMA_LLM_MODEL,
         format=response_format,
     )
+    elapsed = time.time() - t0
+    logger.info("_chat_with_ollama elapsed=%.1fs output_len=%d preview=%s",
+                elapsed, len(result), repr(result[:120]))
+    return result
 
 
 def _prepare_history(conversation_history: Optional[List[Dict[str, str]]]) -> List[Dict[str, str]]:
@@ -173,7 +182,11 @@ Return a JSON object strictly following the provided schema.
     }
 
 
-def generate_rag_answer(question: str, context_blocks: List[Dict[str, str]]) -> str:
+def generate_rag_answer(
+    question: str,
+    context_blocks: List[Dict[str, str]],
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+) -> str:
     if not question:
         raise ValueError('問題不可為空白')
 
@@ -185,6 +198,14 @@ def generate_rag_answer(question: str, context_blocks: List[Dict[str, str]]) -> 
         for idx, block in enumerate(context_blocks)
     )
 
+    history_text = ""
+    if conversation_history:
+        recent = conversation_history[-2:]
+        history_text = "\n".join(
+            f"Q: {turn.get('question', '')}\nA: {turn.get('answer', '')}"
+            for turn in recent
+        )
+
     prompt = f"""
 你是一位文件問答助理，只能根據「可用段落」作答。
 原則：
@@ -193,7 +214,9 @@ def generate_rag_answer(question: str, context_blocks: List[Dict[str, str]]) -> 
 - 若多個段落提供不同面向，請整合並詳盡描述，保留原有數據、條件與關鍵說明。
 - 在回答文字中以 [來源1][來源3] 標示引用來源，可於同一句結尾列出多個來源。
 - 若所有段落皆無法回答，請明確回覆「查無相關資料」，並建議提供更多上下文。
+{f'- 參考對話歷史理解追問脈絡，但答案必須來自可用段落。' if history_text else ''}
 
+{f'對話歷史（最近 2 輪）：{chr(10)}{history_text}{chr(10)}' if history_text else ''}
 使用者問題：
 {question}
 
@@ -212,18 +235,28 @@ def generate_rag_answer(question: str, context_blocks: List[Dict[str, str]]) -> 
         {"role": "user", "content": prompt},
     ])
 
+_EMBED_MAX_CHARS = 7000  # qwen3-embedding:8b supports 8192 tokens (~7000 English chars)
+_EMBED_BATCH_SIZE = 10   # process N chunks per request to avoid timeout
+
 def embed_texts(texts: List[str]) -> List[List[float]]:
     if not texts:
         return []
 
     client = get_client()
-    embeddings = client.embed(
-        texts,
-        model=settings.OLLAMA_EMBED_MODEL,
-    )
-    if len(embeddings) != len(texts):
+    truncated = [t[:_EMBED_MAX_CHARS] for t in texts]
+
+    all_embeddings: List[List[float]] = []
+    for i in range(0, len(truncated), _EMBED_BATCH_SIZE):
+        batch = truncated[i:i + _EMBED_BATCH_SIZE]
+        batch_embeddings = client.embed(
+            batch,
+            model=settings.OLLAMA_EMBED_MODEL,
+        )
+        all_embeddings.extend(batch_embeddings)
+
+    if len(all_embeddings) != len(texts):
         raise RuntimeError("Ollama 回傳的 embedding 數量與輸入不符")
-    return embeddings
+    return all_embeddings
 
 
 def analyze_followup_intent(
@@ -253,17 +286,21 @@ Conversation history (most recent last):
 Current user question: {current_question}
 
 Instructions for the optimized query:
-- Always CONTINUE the previous topic from the latest turn when the new question is short/elliptical.
-- Preserve key entities/test names/terms that appeared previously (e.g., "Pressure test/壓力測試").
-- Merge the user's new intent keywords into that topic to form one concise query.
-- Return only ONE short phrase (<= 8 words), no commas or lists, spaces allowed only.
-- Language must match the user's language in the current question; if Chinese question, return Chinese; otherwise return English.
+- RULE 1 (MANDATORY): The primary test name / subject from the PREVIOUS question MUST appear as the first term in the optimized query. Never drop it.
+- RULE 2: Append the new intent keywords from the current question after the preserved subject.
+- RULE 3: Return ONE phrase (<= 12 words), no commas or lists, spaces allowed only.
+- RULE 4: Language must match the user's current question language.
 
 Examples:
 - Prev: "請問 Pressure test 有幾種測試?"  New: "我要知道測試力量"
   Optimized: "Pressure test 測試力量 數值"
 - Prev: "What are ESD test steps?"  New: "limit"
   Optimized: "ESD test limit values"
+- Prev: "shock test 測試標準"  New: "那關機測試標準呢"
+  BAD:  "關機測試 標準"          ← dropped "shock test", WRONG
+  GOOD: "shock test 關機條件 標準" ← kept subject, CORRECT
+- Prev: "vibration test procedure"  New: "pass criteria?"
+  Optimized: "vibration test pass criteria"
 
 Return JSON strictly following the schema.
 """
@@ -314,6 +351,69 @@ def generate_fallback_answer(question: str) -> str:
         {"role": "system", "content": "請以繁體中文（台灣）作答，嚴格禁止簡體中文。避免輸出控制標記或思考過程。"},
         {"role": "user", "content": prompt},
     ])
+
+
+def extract_text_with_vision(
+    image_bytes_list: List[bytes],
+    page_numbers: List[int],
+) -> List[Dict[str, Any]]:
+    """Use VL model to extract text from PDF page images, preserving layout structure.
+
+    Returns a list of segment dicts compatible with split_segments_into_chunks.
+    """
+    if not image_bytes_list:
+        return []
+
+    client = get_client()
+    segments = []
+
+    def _align14(img_bytes: bytes) -> bytes:
+        """Resize image so both dimensions are multiples of 14 (qwen2.5vl patch size)."""
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        w, h = img.size
+        new_w = max(14, ((w + 13) // 14) * 14)
+        new_h = max(14, ((h + 13) // 14) * 14)
+        if new_w != w or new_h != h:
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        return buf.getvalue()
+
+    prompt = (
+        "Extract ALL text from this PDF page exactly as it appears.\n"
+        "Rules:\n"
+        "- Preserve the original structure: indentation, line breaks, and hierarchy.\n"
+        "- For tables, clearly show which values belong to which row/column label.\n"
+        "  Example: 'Parameter | Condition A | Condition B'\n"
+        "           'Value X   | 100 units   | 200 units'\n"
+        "- For lists with sub-items, use indentation to show the relationship.\n"
+        "- Output ONLY the extracted text. No explanations, no comments.\n"
+        "- If the page contains images or diagrams, briefly describe them in [brackets]."
+    )
+
+    for img_bytes, page_num in zip(image_bytes_list, page_numbers):
+        try:
+            img_bytes = _align14(img_bytes)
+            image_b64 = base64.b64encode(img_bytes).decode("utf-8")
+            raw = client.chat(
+                [
+                    {"role": "system", "content": "You are a precise document text extractor."},
+                    {"role": "user", "content": prompt, "images": [image_b64]},
+                ],
+                model=settings.OLLAMA_VISION_MODEL,
+            )
+            text = raw.strip() if raw else ""
+            if text:
+                segments.append({
+                    "page": page_num,
+                    "paragraph_index": 0,
+                    "text": text,
+                })
+            logger.info("VL extract page=%d text_len=%d", page_num, len(text))
+        except Exception as exc:
+            logger.warning("VL extract page=%d failed, skipping: %s", page_num, exc)
+
+    return segments
 
 
 def analyze_pdf_page_images_singleturn(

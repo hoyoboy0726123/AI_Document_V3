@@ -87,6 +87,7 @@ class DocumentService:
         ai_summary: Optional[str] = None,
         is_image_based: bool = False,
         original_filename: Optional[str] = None,
+        force_vision: bool = False,
     ) -> models.Document:
         document = models.Document(
             title=title,
@@ -105,7 +106,7 @@ class DocumentService:
         self.db.refresh(document, attribute_names=["classification"])
 
         if pdf_temp_path:
-            self._finalize_pdf_and_index(document, pdf_temp_path, segments=segments, original_filename=original_filename)
+            self._finalize_pdf_and_index(document, pdf_temp_path, segments=segments, original_filename=original_filename, force_vision=force_vision)
 
         return document
 
@@ -264,6 +265,7 @@ class DocumentService:
         pdf_temp_path: str,
         segments: Optional[List[Dict[str, Any]]] = None,
         original_filename: Optional[str] = None,
+        force_vision: bool = False,
     ) -> None:
         temp_path = self._resolve_temp_pdf(pdf_temp_path)
         
@@ -283,13 +285,14 @@ class DocumentService:
         document.pdf_path = str(final_path)
         self.db.commit()
 
-        self._rebuild_document_chunks(document, final_path, segments=segments)
+        self._rebuild_document_chunks(document, final_path, segments=segments, force_vision=force_vision)
 
     def _rebuild_document_chunks(
         self,
         document: models.Document,
         pdf_path: Path,
         segments: Optional[List[Dict[str, Any]]] = None,
+        force_vision: bool = False,
     ) -> None:
         existing_chunks = (
             self.db.query(models.DocumentChunk)
@@ -329,6 +332,19 @@ class DocumentService:
                     document.ocr_status = "failed"
                     self.db.commit()
                     raise
+            elif force_vision:
+                # 強制用 VL 視覺模型逐頁解析
+                from .pdf_image import get_pdf_page_count, pdf_pages_to_images
+                document.ocr_method = "vision"
+                self.db.commit()
+                total_pages = get_pdf_page_count(str(pdf_path))
+                page_numbers = list(range(1, total_pages + 1))
+                image_bytes_list = pdf_pages_to_images(str(pdf_path), page_numbers, dpi=100, max_dimension=1024)
+                segments = ai.extract_text_with_vision(image_bytes_list, page_numbers)
+                text = "\n\n".join(s.get("text", "") for s in segments if s.get("text"))
+                if document.content is None or not document.content.strip():
+                    document.content = text[:20000] if text else None
+                self.db.commit()
             else:
                 # 沒有提供 segments，需要從 PDF 提取
                 pdf_bytes = pdf_path.read_bytes()

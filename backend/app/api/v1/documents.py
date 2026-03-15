@@ -251,10 +251,11 @@ def create_document(
         creator=current_user,
         classification=classification,
         pdf_temp_path=payload.source_pdf_path,
-        segments=payload.segments,  # 傳遞預先提取的 segments，避免重複處理
+        segments=None if payload.force_vision else payload.segments,
         ai_summary=payload.ai_summary,
         is_image_based=payload.is_image_based,
         original_filename=payload.original_filename,
+        force_vision=payload.force_vision,
     )
 
     logger.info(f"文件創建成功：ID={document.id}，ocr_status={document.ocr_status}")

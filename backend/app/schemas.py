@@ -120,6 +120,7 @@ class DocumentCreate(DocumentBase):
     ai_summary: Optional[str] = None  # AI 自動生成的文件摘要
     is_image_based: bool = False  # 是否為圖片型 PDF
     original_filename: Optional[str] = None  # 原始檔案名稱
+    force_vision: bool = False  # 建立時用 VL 視覺模型重新解析（在向量化階段執行）
 
 
 class DocumentUpdate(BaseModel):

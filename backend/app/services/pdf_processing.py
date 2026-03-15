@@ -7,13 +7,98 @@ from typing import Any, Dict, List, Optional, Tuple
 BLOCK_TYPE_PARAGRAPH = "paragraph"
 BLOCK_TYPE_TABLE = "table"
 
-from pdfminer.high_level import extract_pages, extract_text
-from pdfminer.layout import LTTextContainer
+import pdfplumber
 from pdfminer.pdfdocument import PDFPasswordIncorrect
 
 from .. import schemas
 
 logger = logging.getLogger(__name__)
+
+_EMPTY_CELL_THRESHOLD = 0.7  # 空白儲存格超過此比例視為空白表格
+
+
+def _cell_text(cell) -> str:
+    return str(cell).replace("\n", " ").strip() if cell else ""
+
+
+def _is_mostly_empty(table_data: List[List], threshold: float = _EMPTY_CELL_THRESHOLD) -> bool:
+    cells = [cell for row in table_data for cell in row]
+    if not cells:
+        return True
+    empty = sum(1 for c in cells if not _cell_text(c))
+    return (empty / len(cells)) >= threshold
+
+
+def _format_table_markdown(table_data: List[List]) -> str:
+    """將 pdfplumber table 格式化為 markdown pipe 表格。"""
+    rows = []
+    for row in table_data:
+        cells = [_cell_text(c) for c in row]
+        rows.append("| " + " | ".join(cells) + " |")
+    return "\n".join(rows)
+
+
+def _table_header_summary(table_data: List[List]) -> str:
+    """空白表格只取第一行非空標題。"""
+    if not table_data:
+        return ""
+    header_cells = [_cell_text(c) for c in table_data[0] if _cell_text(c)]
+    return " | ".join(header_cells)
+
+
+def _extract_page_content(page) -> str:
+    """
+    從 pdfplumber page 提取內容：
+    - 有意義的表格 → markdown pipe 格式
+    - 空白表格 → 只保留標題行
+    - 其餘文字 → 保留空白佈局（layout=True）
+    """
+    # 先找出所有表格及其位置
+    table_objects = page.find_tables()
+    table_bboxes = []
+    table_parts: List[Tuple[float, str]] = []  # (y_top, formatted_text)
+
+    for tobj in table_objects:
+        data = tobj.extract()
+        if not data:
+            continue
+        y_top = tobj.bbox[1]
+        table_bboxes.append(tobj.bbox)
+
+        if _is_mostly_empty(data):
+            summary = _table_header_summary(data)
+            if summary:
+                table_parts.append((y_top, f"[空白記錄表: {summary}]"))
+        else:
+            table_parts.append((y_top, _format_table_markdown(data)))
+
+    # 取得非表格區域的文字（過濾掉落在表格 bbox 內的文字）
+    words = page.extract_words(keep_blank_chars=False, use_text_flow=True)
+    non_table_lines: Dict[float, List[str]] = {}
+
+    for word in words:
+        wx_center = (word["x0"] + word["x1"]) / 2
+        wy_center = (word["top"] + word["bottom"]) / 2
+        in_table = any(
+            bx0 <= wx_center <= bx2 and by0 <= wy_center <= by2
+            for bx0, by0, bx2, by2 in table_bboxes
+        )
+        if not in_table:
+            line_y = round(word["top"], 1)
+            non_table_lines.setdefault(line_y, []).append(word["text"])
+
+    # 組合非表格文字行
+    text_parts: List[Tuple[float, str]] = []
+    for y, words_on_line in sorted(non_table_lines.items()):
+        line = " ".join(words_on_line)
+        if line.strip():
+            text_parts.append((y, line))
+
+    # 按 y 位置合併所有部分
+    all_parts = text_parts + table_parts
+    all_parts.sort(key=lambda x: x[0])
+
+    return "\n".join(text for _, text in all_parts).strip()
 
 
 def extract_text_and_segments(pdf_bytes: bytes) -> Tuple[str, List[schemas.DocumentSegment]]:
@@ -21,40 +106,41 @@ def extract_text_and_segments(pdf_bytes: bytes) -> Tuple[str, List[schemas.Docum
         segments: List[schemas.DocumentSegment] = []
         sections: List[str] = []
 
-        for page_number, page_layout in enumerate(extract_pages(BytesIO(pdf_bytes)), start=1):
-            page_text_parts: List[str] = []
-            for element in page_layout:
-                if isinstance(element, LTTextContainer):
-                    page_text_parts.append(element.get_text())
+        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+            for page_number, page in enumerate(pdf.pages, start=1):
+                page_text = _extract_page_content(page)
+                if not page_text:
+                    continue
 
-            page_text = "".join(page_text_parts).strip()
-            if not page_text:
-                continue
+                sections.append(page_text)
+                paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", page_text) if p.strip()]
 
-            sections.append(page_text)
-            paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", page_text) if part.strip()]
-
-            for idx, paragraph in enumerate(paragraphs, start=1):
-                normalized = re.sub(r"\s+", " ", paragraph)
-                if len(normalized) > 1000:
-                    normalized = f"{normalized[:1000]}..."
-                segments.append(schemas.DocumentSegment(page=page_number, paragraph_index=idx, text=normalized))
+                for idx, paragraph in enumerate(paragraphs, start=1):
+                    normalized = re.sub(r"[ \t]+", " ", paragraph)
+                    if len(normalized) > 1000:
+                        normalized = f"{normalized[:1000]}..."
+                    segments.append(
+                        schemas.DocumentSegment(page=page_number, paragraph_index=idx, text=normalized)
+                    )
 
         combined_text = "\n\n".join(sections).strip()
         if combined_text:
             return combined_text, segments
+
     except PDFPasswordIncorrect:
         raise
-    except Exception as exc:  # pragma: no cover - fallback to plain extraction
-        logger.debug("Structured PDF extraction failed, fallback to plain text: %s", exc)
+    except Exception as exc:
+        logger.warning("pdfplumber extraction failed, falling back to pdfminer: %s", exc)
 
+    # Fallback：退回 pdfminer 純文字提取
     try:
+        from pdfminer.high_level import extract_text
         plain_text = (extract_text(BytesIO(pdf_bytes)) or "").strip()
         return plain_text, []
     except PDFPasswordIncorrect:
         raise
-    except Exception as exc:  # pragma: no cover
-        logger.debug("Plain text extraction failed: %s", exc)
+    except Exception as exc:
+        logger.debug("Plain text extraction also failed: %s", exc)
         return "", []
 
 
@@ -76,14 +162,6 @@ def split_segments_into_chunks(
 ) -> List[Dict[str, Any]]:
     """
     將段落合併成向量塊，支援 overlap 重疊設計
-
-    Args:
-        segments: 文檔段落列表
-        max_chars: 向量塊最大字符數（預設 1800）
-        overlap_chars: 向量塊之間的重疊字符數（預設 250）
-
-    Returns:
-        向量塊列表，每個塊包含 chunk_index, page, paragraph_index, text
     """
     chunks: List[Dict[str, Any]] = []
     current_text: List[str] = []
@@ -92,7 +170,6 @@ def split_segments_into_chunks(
     chunk_index = 0
 
     for segment in segments:
-        # 支援字典或物件兩種格式
         if isinstance(segment, dict):
             segment_text = segment.get("text", "").strip()
             seg_page = segment.get("page")
@@ -107,7 +184,6 @@ def split_segments_into_chunks(
 
         prospective = "\n".join(current_text + [segment_text]) if current_text else segment_text
         if current_text and len(prospective) > max_chars:
-            # 完成當前向量塊
             full_text = "\n".join(current_text)
             chunks.append(
                 {
@@ -120,12 +196,10 @@ def split_segments_into_chunks(
             )
             chunk_index += 1
 
-            # 提取重疊部分作為下一個向量塊的開頭
             if len(full_text) > overlap_chars:
                 overlap_text = full_text[-overlap_chars:]
                 current_text = [overlap_text, segment_text]
             else:
-                # 如果當前塊太短，無法提供足夠的重疊，就從新段落開始
                 current_text = [segment_text]
 
             current_page = seg_page

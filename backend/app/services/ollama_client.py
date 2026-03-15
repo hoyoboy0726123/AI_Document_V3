@@ -167,13 +167,18 @@ def _strip_control_tokens(text: str) -> str:
         return text
 
     cleaned = text
+    # Truncate at stop tokens that signal end of model output
+    for stop in ["<|endoftext|>", "<|im_end|>", "</s>"]:
+        if stop in cleaned:
+            cleaned = cleaned[:cleaned.index(stop)]
+
     # Zero-width and non-printing characters
     cleaned = re.sub(r"[\u200B\u200C\u200D\u2060\ufeff]", "", cleaned)
 
     # Common tokens to strip
     tokens = [
         r"<\|im_start\|>", r"<\|im_end\|>", r"<\|assistant\|>", r"<\|user\|>",
-        r"<<SYS>>", r"</SYS>", r"<s>", r"</s>",
+        r"<<SYS>>", r"</SYS>", r"<s>", r"</s>", r"<\|endoftext\|>",
     ]
     for t in tokens:
         cleaned = re.sub(t, "", cleaned, flags=re.IGNORECASE)

@@ -1,5 +1,5 @@
 ﻿import React, { useEffect, useMemo, useState } from "react";
-import { Alert, Button, Card, Form, Input, Modal, Radio, Select, Space, Spin, Upload, Typography, message, Divider } from "antd";
+import { Alert, Button, Card, Checkbox, Form, Input, Modal, Radio, Select, Space, Spin, Upload, Typography, message, Divider } from "antd";
 import { InboxOutlined, PlusOutlined } from "@ant-design/icons";
 import apiClient from "../../services/api";
 import AISuggestionModal from "./AISuggestionModal";
@@ -21,6 +21,9 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
   const [addOptionField, setAddOptionField] = useState(null);
   const [addOptionForm] = Form.useForm();
   const [addingOption, setAddingOption] = useState(false);
+
+  // 強制 VL 視覺解析
+  const [forceVision, setForceVision] = useState(false);
 
   // OCR 相關狀態
   const [ocrModalVisible, setOcrModalVisible] = useState(false);
@@ -209,13 +212,16 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
     const pdfTempPath = form.getFieldValue("source_pdf_path");
     if (pdfTempPath) {
       payload.source_pdf_path = pdfTempPath;
-      // 傳遞預先提取的 segments，避免後端重複處理
-      if (suggestionState?.segments) {
+      // VL 模式下不傳 segments，讓後端在向量化時重新用 VL 解析
+      if (!forceVision && suggestionState?.segments) {
         payload.segments = suggestionState.segments;
       }
       // 傳遞 AI 生成的文件摘要
       if (suggestionState?.suggestion?.summary) {
         payload.ai_summary = suggestionState.suggestion.summary;
+      }
+      if (forceVision) {
+        payload.force_vision = true;
       }
     }
 
@@ -227,7 +233,11 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
         message.success("文件已更新");
       } else {
         // 建立文件時，顯示包含向量化的完整說明
-        setProcessingStatus("正在建立文件並生成向量索引，這可能需要 10-30 秒，請稍候...");
+        setProcessingStatus(
+          forceVision
+            ? "正在使用視覺模型逐頁解析並建立向量索引，150 頁文件約需 30–60 分鐘，請耐心等候..."
+            : "正在建立文件並生成向量索引，這可能需要 10-30 秒，請稍候..."
+        );
         await apiClient.post("documents/", payload);
         message.success("文件已建立，向量索引已完成");
       }
@@ -499,6 +509,21 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
         <p className="ant-upload-text">點擊或拖曳 PDF 檔案到此上傳</p>
         <p className="ant-upload-hint">僅支援 PDF，系統會即時解析並提供 AI 建議。</p>
       </Dragger>
+
+      <div style={{ marginBottom: 12 }}>
+        <Checkbox
+          checked={forceVision}
+          onChange={(e) => setForceVision(e.target.checked)}
+          disabled={uploading}
+        >
+          強制使用視覺模型解析（適合含表格、欄位對齊或大量圖片的 PDF/PPT 轉檔）
+        </Checkbox>
+        {forceVision && (
+          <Typography.Text type="secondary" style={{ display: "block", marginTop: 4, fontSize: 12 }}>
+            解析時間較長（每頁約 10–30 秒），圖片內容也會被描述並納入向量索引。
+          </Typography.Text>
+        )}
+      </div>
 
       {uploading && (
         <Card style={{ marginBottom: 16 }} size="small">

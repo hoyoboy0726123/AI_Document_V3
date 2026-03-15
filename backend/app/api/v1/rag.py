@@ -68,21 +68,7 @@ def query_rag(
         if (has_cn and not has_cn_opt) or (not has_cn and has_cn_opt):
             search_query = question
 
-        if not needs_new_search and payload.conversation_history:
-            last_sources = payload.conversation_history[-1].sources
-            if last_sources:
-                contexts = [
-                    {"title": s.title, "page": s.page or 0, "text": s.snippet}
-                    for s in last_sources
-                ]
-                answer = ai.generate_rag_answer(optimized_query or question, contexts)
-                return schemas.RAGQueryResponse(
-                    answer=answer,
-                    sources=last_sources,
-                    is_followup=True,
-                    optimized_query=optimized_query,
-                    suggested_questions=[],
-                )
+        # Always re-search with optimized_query for accurate follow-up results
 
     embeddings = ai.embed_texts([search_query])
     if not embeddings:
@@ -140,7 +126,11 @@ def query_rag(
         )
 
     final_question = optimized_query or question
-    answer = ai.generate_rag_answer(final_question, contexts)
+    history = (
+        [{"question": m.question, "answer": m.answer} for m in payload.conversation_history]
+        if payload.conversation_history else None
+    )
+    answer = ai.generate_rag_answer(final_question, contexts, conversation_history=history)
     return schemas.RAGQueryResponse(
         answer=answer,
         sources=sources,
