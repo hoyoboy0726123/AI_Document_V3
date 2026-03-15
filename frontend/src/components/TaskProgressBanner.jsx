@@ -54,7 +54,9 @@ const TaskProgressBanner = () => {
               <Space size={6}>
                 {statusIcon(taskStatus)}
                 <Typography.Text strong style={{ fontSize: 13 }}>
-                  VL 視覺解析
+                  {st?.task_type === "vl_vectorize" ? "VL 視覺解析"
+                   : st?.task_type === "pdf_analyze" ? "PDF 文件分析"
+                   : "向量索引建立"}
                 </Typography.Text>
                 <Tag color={statusColor(taskStatus)} style={{ fontSize: 11 }}>
                   {taskStatus === "pending" ? "等待中" :
@@ -107,6 +109,20 @@ const TaskProgressBanner = () => {
                 }}
               >
                 前往文件 →
+              </Button>
+            )}
+
+            {isDone && !entry.document_id && st?.task_type === "pdf_analyze" && taskStatus === "completed" && st?.result && (
+              <Button
+                size="small"
+                type="primary"
+                style={{ padding: "0 8px", fontSize: 12, height: 24 }}
+                onClick={() => {
+                  removeTask(entry.task_id);
+                  navigate("/documents/new", { state: { uploadResult: st.result } });
+                }}
+              >
+                前往填寫表單 →
               </Button>
             )}
           </Card>

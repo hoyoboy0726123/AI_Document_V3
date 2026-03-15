@@ -92,8 +92,16 @@ def ensure_schema_updates() -> None:
                             {"faiss": index, "chunk_id": chunk_id},
                         )
 
-        # background_tasks 資料表（由 SQLAlchemy create_all 建立，但需確認欄位）
-        # 此表在第一次啟動時由 create_all 自動建立，無需手動 ALTER
+        # Check background_tasks table columns
+        if inspector.has_table('background_tasks'):
+            bg_columns = {col['name'] for col in inspector.get_columns('background_tasks')}
+            with engine.begin() as connection:
+                if 'result' not in bg_columns:
+                    logger.info("Adding result column to background_tasks table")
+                    if engine.dialect.name == 'sqlite':
+                        connection.execute(text("ALTER TABLE background_tasks ADD COLUMN result TEXT"))
+                    else:
+                        connection.execute(text("ALTER TABLE background_tasks ADD COLUMN result JSON"))
 
         logger.info("Schema updates completed successfully")
 

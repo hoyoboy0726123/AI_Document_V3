@@ -414,56 +414,7 @@ class DocumentService:
 
         vector_store.add_embeddings(faiss_mapping)
 
-
-# ── 背景任務執行函式（獨立 DB Session）────────────────────────────────────────
-
-def run_vl_vectorize_task(task_id: str, document_id: str) -> None:
-    """
-    供 FastAPI BackgroundTasks 呼叫：用 VL 模型重新解析並向量化。
-    使用獨立 DB Session，不依賴請求生命週期。
-    """
-    from ..database import SessionLocal
-
-    db = SessionLocal()
-    try:
-        task = db.query(models.BackgroundTask).filter_by(id=task_id).first()
-        document = db.query(models.Document).filter_by(id=document_id).first()
-
-        if not task or not document:
-            return
-
-        task.status = "running"
-        task.message = "正在使用 VL 視覺模型逐頁解析 PDF..."
-        db.commit()
-
-        service = DocumentService(db)
-        pdf_path = Path(document.pdf_path)
-
-        task.progress = 10
-        task.message = "正在載入 PDF 頁面..."
-        db.commit()
-
-        service._rebuild_document_chunks(document, pdf_path, segments=None, force_vision=True)
-
-        task.status = "completed"
-        task.progress = 100
-        task.message = "VL 解析與向量化完成"
-        db.commit()
-
-    except Exception as exc:
-        try:
-            task = db.query(models.BackgroundTask).filter_by(id=task_id).first()
-            if task:
-                task.status = "failed"
-                task.error = str(exc)[:500]
-                db.commit()
-        except Exception:
-            pass
-    finally:
-        db.close()
-
     def _re_embed_existing_chunks(self, document: models.Document) -> None:
-
         """
         重新向量化現有的 chunks，不重新提取 PDF 文字
 
@@ -504,3 +455,205 @@ def run_vl_vectorize_task(task_id: str, document_id: str) -> None:
         self.db.commit()
 
         vector_store.add_embeddings(faiss_mapping)
+
+
+# ── 背景任務執行函式（獨立 DB Session）────────────────────────────────────────
+
+def run_document_finalize_task(
+    task_id: str,
+    document_id: str,
+    pdf_temp_path: str,
+    force_vision: bool,
+    segments_json: Optional[str],
+    original_filename: Optional[str],
+) -> None:
+    """
+    供 FastAPI BackgroundTasks 呼叫：移動 PDF 並建立向量索引。
+    使用獨立 DB Session，不依賴請求生命週期。
+    force_vision=True 時改用 VL 視覺模型解析。
+    """
+    import json as _json
+    from ..database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        task = db.query(models.BackgroundTask).filter_by(id=task_id).first()
+        document = db.query(models.Document).filter_by(id=document_id).first()
+
+        if not task or not document:
+            return
+
+        task.status = "running"
+        task.message = "正在使用 VL 視覺模型解析..." if force_vision else "正在建立向量索引..."
+        db.commit()
+
+        service = DocumentService(db)
+        segments = _json.loads(segments_json) if segments_json else None
+
+        service._finalize_pdf_and_index(
+            document,
+            pdf_temp_path,
+            segments=segments,
+            original_filename=original_filename,
+            force_vision=force_vision,
+        )
+
+        task.status = "completed"
+        task.progress = 100
+        task.message = "VL 解析與向量化完成" if force_vision else "向量化完成"
+        db.commit()
+
+    except Exception as exc:
+        try:
+            task = db.query(models.BackgroundTask).filter_by(id=task_id).first()
+            if task:
+                task.status = "failed"
+                task.error = str(exc)[:500]
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
+# 保留舊名稱相容性
+run_vl_vectorize_task = run_document_finalize_task
+
+
+def run_upload_analysis_task(task_id: str, file_path: str, filename: str) -> None:
+    """
+    背景執行 PDF 文字提取 + AI 建議分析。
+    結果存入 BackgroundTask.result，前端 poll 後取用。
+    """
+    from ..database import SessionLocal
+    from . import ai
+    from .metadata import MetadataService
+    from .pdf_processing import extract_text_and_segments, suggest_keywords
+
+    db = SessionLocal()
+    try:
+        task = db.query(models.BackgroundTask).filter_by(id=task_id).first()
+        if not task:
+            return
+
+        task.status = "running"
+        task.progress = 15
+        task.message = "正在提取 PDF 文字..."
+        db.commit()
+
+        pdf_bytes = Path(file_path).read_bytes()
+        text, segments = extract_text_and_segments(pdf_bytes)
+
+        # 判斷是否為圖片型 PDF
+        text_length = len(text.strip()) if text else 0
+        is_image_based = text_length < 100
+
+        if is_image_based:
+            from .pdf_image import get_pdf_page_count
+            try:
+                total_pages = get_pdf_page_count(file_path)
+            except Exception:
+                total_pages = None
+            task.result = {
+                "text": text or "",
+                "filename": filename,
+                "segments": [],
+                "suggested_metadata": {},
+                "suggestion": {},
+                "pdf_temp_path": file_path,
+                "is_image_based": True,
+                "total_pages": total_pages,
+            }
+            task.status = "completed"
+            task.progress = 100
+            task.message = "偵測到圖片型 PDF"
+            db.commit()
+            return
+
+        task.progress = 45
+        task.message = "正在生成 AI 摘要與建議..."
+        db.commit()
+
+        # 取得分類與專案供 AI 參考
+        metadata_service = MetadataService(db)
+        metadata_fields = metadata_service.list_fields(active_only=True)
+
+        classifications = db.query(models.ClassificationCategory).filter_by(is_active=True).all()
+        classification_prompt = [
+            f"{c.name} ({c.code})" if c.code else c.name for c in classifications
+        ]
+
+        project_field = next((f for f in metadata_fields if f.name == "project_id"), None)
+        project_options = getattr(project_field, "options", []) if project_field else []
+        project_prompt = [o.display_value or o.value for o in project_options]
+
+        text_for_ai = text[:20000] if text else ""
+        segs_for_ai = [s.model_dump() for s in segments]
+
+        try:
+            suggestion_payload = ai.generate_document_suggestion(
+                text=text_for_ai,
+                classifications=classification_prompt,
+                projects=project_prompt,
+                segments=segs_for_ai,
+            )
+        except Exception:
+            suggestion_payload = {}
+
+        task.progress = 80
+        task.message = "整理關鍵字與元數據..."
+        db.commit()
+
+        # 關鍵字合併
+        kw_candidates = list(suggestion_payload.get("keywords", [])) + suggest_keywords(text or "")
+        seen = set()
+        merged_keywords = []
+        for k in kw_candidates:
+            if k and k.lower() not in seen:
+                seen.add(k.lower())
+                merged_keywords.append(k)
+
+        suggested_metadata: Dict[str, Any] = {"keywords": merged_keywords}
+
+        # 比對 file_type
+        file_type_field = next((f for f in metadata_fields if f.name == "file_type"), None)
+        if file_type_field:
+            raw_ft = (suggestion_payload.get("metadata") or {}).get("file_type")
+            for opt in getattr(file_type_field, "options", []):
+                if raw_ft and raw_ft in (opt.value, opt.display_value):
+                    suggested_metadata["file_type"] = opt.value
+                    break
+
+        # 比對 project
+        if project_field:
+            raw_proj = (suggestion_payload.get("metadata") or {}).get("project_id") or suggestion_payload.get("project")
+            for opt in project_options:
+                if raw_proj and raw_proj in (opt.value, opt.display_value):
+                    suggested_metadata["project_id"] = opt.value
+                    break
+
+        task.result = {
+            "text": text_for_ai,
+            "filename": filename,
+            "segments": segs_for_ai,
+            "suggested_metadata": suggested_metadata,
+            "suggestion": suggestion_payload or {},
+            "pdf_temp_path": file_path,
+            "is_image_based": False,
+        }
+        task.status = "completed"
+        task.progress = 100
+        task.message = "PDF 分析完成"
+        db.commit()
+
+    except Exception as exc:
+        try:
+            task = db.query(models.BackgroundTask).filter_by(id=task_id).first()
+            if task:
+                task.status = "failed"
+                task.error = str(exc)[:500]
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()

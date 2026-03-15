@@ -1,6 +1,7 @@
-﻿import React, { useEffect, useMemo, useState } from "react";
-import { Alert, Button, Card, Checkbox, Form, Input, Modal, Radio, Select, Space, Spin, Upload, Typography, message, Divider } from "antd";
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Alert, Button, Card, Checkbox, Form, Input, Modal, Progress, Radio, Select, Space, Spin, Upload, Typography, message, Divider } from "antd";
 import { InboxOutlined, PlusOutlined } from "@ant-design/icons";
+import { useLocation } from "react-router-dom";
 import apiClient from "../../services/api";
 import AISuggestionModal from "./AISuggestionModal";
 import { useTaskStatus } from "../../contexts/TaskStatusContext";
@@ -8,7 +9,8 @@ import { useTaskStatus } from "../../contexts/TaskStatusContext";
 const { Dragger } = Upload;
 
 const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
-  const { addTask } = useTaskStatus();
+  const { tasks, addTask, taskStatuses } = useTaskStatus();
+  const location = useLocation();
   const [form] = Form.useForm();
   const [metadataFields, setMetadataFields] = useState([]);
   const [classificationOptions, setClassificationOptions] = useState([]);
@@ -26,6 +28,9 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
 
   // 強制 VL 視覺解析
   const [forceVision, setForceVision] = useState(false);
+
+  // 上傳分析任務追蹤
+  const [uploadTaskId, setUploadTaskId] = useState(null);
 
   // OCR 相關狀態
   const [ocrModalVisible, setOcrModalVisible] = useState(false);
@@ -55,6 +60,16 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
   useEffect(() => {
     fetchMetadataFields();
     fetchClassifications();
+  }, []);
+
+  // 從 banner「前往填寫表單」按鈕跳轉過來時，帶入分析結果
+  useEffect(() => {
+    const result = location.state?.uploadResult;
+    if (!result || isEdit) return;
+    // 清除 state，避免頁面重整時重複套用
+    window.history.replaceState({}, "", window.location.pathname);
+    applyUploadResult(result);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -233,23 +248,23 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
         setProcessingStatus("正在更新文件...");
         await apiClient.put(`documents/${document.id}`, payload);
         message.success("文件已更新");
-      } else if (forceVision) {
-        // VL 模式：立刻建立文件，VL 解析在後台執行
-        setProcessingStatus("正在建立文件（VL 解析將在背景執行）...");
+      } else {
+        setProcessingStatus("正在建立文件...");
         const resp = await apiClient.post("documents/", payload);
         const taskId = resp.data?.task_id;
         const docId = resp.data?.id;
         const docTitle = resp.data?.title ?? payload.title;
         if (taskId && docId) {
+          // 有 task_id → 向量化在背景執行，立刻可以繼續操作
           addTask({ task_id: taskId, document_id: docId, document_title: docTitle });
-          message.success("文件已建立，VL 視覺解析正在背景執行，可繼續使用系統");
+          message.success(
+            forceVision
+              ? "文件已建立，VL 視覺解析正在背景執行，可繼續使用系統"
+              : "文件已建立，向量索引正在背景執行，稍後即可搜尋"
+          );
         } else {
           message.success("文件已建立");
         }
-      } else {
-        setProcessingStatus("正在建立文件並生成向量索引，這可能需要 10-30 秒，請稍候...");
-        await apiClient.post("documents/", payload);
-        message.success("文件已建立，向量索引已完成");
       }
       onSuccess?.();
     } catch (error) {
@@ -260,87 +275,122 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
     }
   };
 
+  // 接收分析完成的結果，填入表單並開啟建議 Modal
+  const applyUploadResult = useCallback((result) => {
+    if (!result) return;
+
+    if (result.is_image_based) {
+      setOcrData({
+        filename: result.filename,
+        total_pages: result.total_pages,
+        pdf_temp_path: result.pdf_temp_path,
+      });
+      form.setFieldsValue({
+        title: form.getFieldValue("title") || (result.filename?.replace(/\.pdf$/i, "") ?? ""),
+        source_pdf_path: result.pdf_temp_path,
+      });
+      setUploading(false);
+      setUploadTaskId(null);
+      message.warning({
+        content: `檢測到圖片型 PDF（共 ${result.total_pages ?? "?"} 頁），僅支持預覽功能。`,
+        duration: 5,
+      });
+      return;
+    }
+
+    const currentMetadata = form.getFieldValue("metadata") || {};
+    const suggestedMetadata = result.suggested_metadata || {};
+    const mergedKeywords = Array.from(
+      new Set([...(currentMetadata.keywords || []), ...(suggestedMetadata.keywords ?? [])]),
+    );
+    const metadataPatch = { ...currentMetadata, keywords: mergedKeywords };
+    if (suggestedMetadata.file_type) metadataPatch.file_type = suggestedMetadata.file_type;
+    if (suggestedMetadata.project_id) metadataPatch.project_id = suggestedMetadata.project_id;
+
+    form.setFieldsValue({
+      title: form.getFieldValue("title") || (result.filename?.replace(/\.pdf$/i, "") ?? ""),
+      content: result.text || "",
+      metadata: metadataPatch,
+      source_pdf_path: result.pdf_temp_path,
+    });
+
+    setSuggestionState({
+      suggestion: result.suggestion,
+      segments: result.segments ?? [],
+      suggestedMetadata,
+      text: result.text,
+    });
+    setSuggestionVisible(true);
+    setUploading(false);
+    setUploadTaskId(null);
+    message.success("PDF 分析完成，請確認 AI 建議");
+  }, [form]);
+
+  // 組件重新 mount 時（用戶切換頁面後回來），恢復進行中的上傳任務狀態
+  useEffect(() => {
+    if (isEdit) return;
+    const activeUpload = tasks.find(
+      (t) => t.task_type === "pdf_analyze" &&
+        (taskStatuses[t.task_id]?.status === "pending" ||
+         taskStatuses[t.task_id]?.status === "running" ||
+         !taskStatuses[t.task_id])  // 尚未收到第一次 poll 結果
+    );
+    if (!activeUpload) return;
+
+    setUploadTaskId(activeUpload.task_id);
+    setUploading(true);
+    setProcessingStatus("PDF 正在背景分析中，可先填寫其他欄位...");
+
+    // 重新註冊 callback，確保任務完成時能觸發新的 applyUploadResult
+    addTask(
+      { task_id: activeUpload.task_id, task_type: "pdf_analyze", document_title: activeUpload.document_title },
+      (taskData) => {
+        if (taskData.status === "completed" && taskData.result) {
+          applyUploadResult(taskData.result);
+        } else if (taskData.status === "failed") {
+          message.error(taskData.error ?? "PDF 分析失敗");
+          setUploading(false);
+          setUploadTaskId(null);
+        }
+      }
+    );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handlePdfUpload = async (file) => {
     const formData = new FormData();
     formData.append("file", file);
 
     try {
       setUploading(true);
-      setProcessingStatus("正在擷取文件內容...");
+      setProcessingStatus("正在上傳 PDF...");
 
-      const resp = await apiClient.post("documents/upload/", formData, {
+      // 呼叫非同步 upload endpoint，立刻取得 task_id
+      const resp = await apiClient.post("documents/upload/async", formData, {
         headers: { "Content-Type": "multipart/form-data" },
       });
 
-      // 檢測是否為圖片型 PDF（需要 OCR 處理）
-      if (resp.data.is_image_based) {
-        setOcrData({
-          filename: resp.data.filename,
-          total_pages: resp.data.total_pages,
-          pdf_temp_path: resp.data.pdf_temp_path,
-        });
+      const taskId = resp.data.id;
+      setUploadTaskId(taskId);
+      setProcessingStatus("PDF 正在背景分析中，可先填寫其他欄位...");
 
-        form.setFieldsValue({
-          title: form.getFieldValue("title") ||
-                 (resp.data.filename ? resp.data.filename.replace(/\.pdf$/i, "") : ""),
-          source_pdf_path: resp.data.pdf_temp_path,
-        });
-
-        setUploading(false);
-        setProcessingStatus("");
-        // 不立即顯示 OCR Modal，等用戶填寫完必填欄位並點擊建立時再顯示
-        message.warning({
-          content: `檢測到圖片型 PDF（共 ${resp.data.total_pages} 頁），僅支持預覽功能。請填寫必填欄位後點擊「建立」保存文件。`,
-          duration: 5,
-        });
-        return false;
-      }
-
-      setProcessingStatus("正在解析 PDF 並生成 AI 建議...");
-
-      const currentMetadata = form.getFieldValue("metadata") || {};
-      const suggestedMetadata = resp.data.suggested_metadata || {};
-      const suggestedKeywords = suggestedMetadata.keywords ?? [];
-      const mergedKeywords = Array.from(
-        new Set([...(currentMetadata.keywords || []), ...suggestedKeywords]),
+      // 把任務加入全域追蹤，完成時呼叫 applyUploadResult
+      addTask(
+        { task_id: taskId, task_type: "pdf_analyze", document_title: file.name },
+        (taskData) => {
+          if (taskData.status === "completed" && taskData.result) {
+            applyUploadResult(taskData.result);
+          } else if (taskData.status === "failed") {
+            message.error(taskData.error ?? "PDF 分析失敗");
+            setUploading(false);
+            setUploadTaskId(null);
+          }
+        }
       );
 
-      const metadataPatch = {
-        ...currentMetadata,
-        keywords: mergedKeywords,
-      };
-
-      if (suggestedMetadata.file_type) {
-        metadataPatch.file_type = suggestedMetadata.file_type;
-      }
-      if (suggestedMetadata.project_id) {
-        metadataPatch.project_id = suggestedMetadata.project_id;
-      }
-
-      form.setFieldsValue({
-        title:
-          form.getFieldValue("title") ||
-          (resp.data.filename ? resp.data.filename.replace(/\.pdf$/i, "") : ""),
-        content: resp.data.text || "",  // 保存 text，避免後端重複提取
-        metadata: metadataPatch,
-        source_pdf_path: resp.data.pdf_temp_path,
-      });
-
-      setSuggestionState({
-        suggestion: resp.data.suggestion,
-        segments: resp.data.segments ?? [],
-        suggestedMetadata,
-        text: resp.data.text,  // 保存 text 供後續使用
-      });
-      setSuggestionVisible(true);
-
-      setProcessingStatus("");
-      message.success("PDF 上傳並解析完成");
     } catch (error) {
       message.error(error.response?.data?.detail ?? "上傳 PDF 時發生錯誤");
-    } finally {
       setUploading(false);
-      setProcessingStatus("");
     }
 
     return false;
@@ -545,9 +595,22 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
 
       {uploading && (
         <Card style={{ marginBottom: 16 }} size="small">
-          <Space direction="vertical" style={{ width: "100%", textAlign: "center" }}>
-            <Spin size="large" />
+          <Space direction="vertical" style={{ width: "100%" }}>
             <Typography.Text strong>{processingStatus}</Typography.Text>
+            {uploadTaskId && taskStatuses[uploadTaskId] ? (
+              <>
+                <Progress
+                  percent={taskStatuses[uploadTaskId].progress ?? 0}
+                  status="active"
+                  strokeColor={{ from: "#1677ff", to: "#52c41a" }}
+                />
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {taskStatuses[uploadTaskId].message ?? ""}
+                </Typography.Text>
+              </>
+            ) : (
+              <Progress percent={5} status="active" strokeColor="#1677ff" />
+            )}
           </Space>
         </Card>
       )}

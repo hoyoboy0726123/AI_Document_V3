@@ -212,13 +212,14 @@ class BackgroundTask(BaseMixin, Base):
     """非同步背景工作（VL 解析、批次向量化等）"""
     __tablename__ = "background_tasks"
 
-    task_type: Mapped[str] = mapped_column(String(50), nullable=False)   # "vl_vectorize"
+    task_type: Mapped[str] = mapped_column(String(50), nullable=False)   # "vl_vectorize" / "vectorize" / "pdf_analyze"
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)  # pending/running/completed/failed
     progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)  # 0-100
     message: Mapped[Optional[str]] = mapped_column(Text)
     document_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("documents.id"))
     creator_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
     error: Mapped[Optional[str]] = mapped_column(Text)
+    result: Mapped[Optional[dict]] = mapped_column(MutableDict.as_mutable(JSON))  # pdf_analyze 任務的分析結果
 
 
 class AuditLog(BaseMixin, Base):

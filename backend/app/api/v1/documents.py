@@ -15,7 +15,7 @@ from ...core.config import settings
 from ...core.security import get_current_user
 from ...database import get_db
 from ...services import ai
-from ...services.documents import DocumentService, run_vl_vectorize_task
+from ...services.documents import DocumentService, run_document_finalize_task, run_upload_analysis_task
 from ...services.metadata import MetadataService
 from ...services.pdf_processing import extract_text_and_segments, suggest_keywords
 from ...services.pdf_image import get_pdf_page_count
@@ -245,28 +245,33 @@ def create_document(
 
     logger.info(f"開始創建文件：分類={classification.name if classification else 'None'}，metadata={payload.metadata}")
 
-    # force_vision：建立文件記錄後立刻返回，VL 解析以背景任務執行
-    if payload.force_vision and payload.source_pdf_path:
+    # 有 PDF 且非圖片型（圖片型走 OCR 流程）→ 全部背景執行
+    if payload.source_pdf_path and not payload.is_image_based:
+        import json as _json
+
+        # 只建立文件記錄，不做 PDF 處理
         document = doc_service.create(
             title=payload.title,
             content=payload.content,
             metadata=payload.metadata,
             creator=current_user,
             classification=classification,
-            pdf_temp_path=payload.source_pdf_path,
+            pdf_temp_path=None,   # 不在這裡處理 PDF
             segments=None,
             ai_summary=payload.ai_summary,
-            is_image_based=payload.is_image_based,
+            is_image_based=False,
             original_filename=payload.original_filename,
-            force_vision=False,  # 不在這裡做 VL，交給背景任務
+            force_vision=False,
         )
 
-        # 建立背景任務記錄
+        task_type = "vl_vectorize" if payload.force_vision else "vectorize"
+        task_msg = "等待 VL 解析開始..." if payload.force_vision else "等待向量化開始..."
+
         bg_task = models.BackgroundTask(
-            task_type="vl_vectorize",
+            task_type=task_type,
             status="pending",
             progress=0,
-            message="等待 VL 解析開始...",
+            message=task_msg,
             document_id=document.id,
             creator_id=current_user.id,
         )
@@ -274,17 +279,23 @@ def create_document(
         db.commit()
         db.refresh(bg_task)
 
-        # 啟動背景任務
-        background_tasks.add_task(run_vl_vectorize_task, task_id=bg_task.id, document_id=document.id)
+        background_tasks.add_task(
+            run_document_finalize_task,
+            task_id=bg_task.id,
+            document_id=document.id,
+            pdf_temp_path=payload.source_pdf_path,
+            force_vision=payload.force_vision,
+            segments_json=_json.dumps(payload.segments) if payload.segments and not payload.force_vision else None,
+            original_filename=payload.original_filename,
+        )
 
-        logger.info(f"VL 背景任務已啟動：task_id={bg_task.id}，document_id={document.id}")
+        logger.info(f"背景任務已啟動：type={task_type}，task_id={bg_task.id}，document_id={document.id}")
 
-        # 把 task_id 附在回應中（DocumentRead 有 task_id 欄位）
         result = schemas.DocumentRead.model_validate(document)
         result.task_id = bg_task.id
         return result
 
-    # 一般路徑（同步向量化）
+    # 無 PDF 或圖片型 PDF（同步建立）
     document = doc_service.create(
         title=payload.title,
         content=payload.content,
@@ -292,11 +303,11 @@ def create_document(
         creator=current_user,
         classification=classification,
         pdf_temp_path=payload.source_pdf_path,
-        segments=None if payload.force_vision else payload.segments,
+        segments=payload.segments,
         ai_summary=payload.ai_summary,
         is_image_based=payload.is_image_based,
         original_filename=payload.original_filename,
-        force_vision=payload.force_vision,
+        force_vision=False,
     )
 
     logger.info(f"文件創建成功：ID={document.id}，ocr_status={document.ocr_status}")
@@ -652,6 +663,47 @@ async def upload_pdf_for_extraction(
         if temp_path.exists():
             temp_path.unlink(missing_ok=True)
         raise
+
+
+@router.post("/upload/async", response_model=schemas.TaskRead, status_code=status.HTTP_202_ACCEPTED)
+async def upload_pdf_async(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """非同步上傳 PDF：立刻返回 task_id，文字提取與 AI 分析在背景執行"""
+    if file.content_type not in {"application/pdf", "application/octet-stream"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only PDF files are supported")
+
+    pdf_bytes = await file.read()
+    FileValidator.validate_pdf_not_empty(pdf_bytes)
+
+    temp_dir = Path(settings.PDF_TEMP_DIR)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_filename = f"{uuid.uuid4()}.pdf"
+    temp_path = temp_dir / temp_filename
+    temp_path.write_bytes(pdf_bytes)
+
+    bg_task = models.BackgroundTask(
+        task_type="pdf_analyze",
+        status="pending",
+        progress=0,
+        message="等待分析開始...",
+        creator_id=current_user.id,
+    )
+    db.add(bg_task)
+    db.commit()
+    db.refresh(bg_task)
+
+    background_tasks.add_task(
+        run_upload_analysis_task,
+        task_id=bg_task.id,
+        file_path=str(temp_path),
+        filename=file.filename or "uploaded.pdf",
+    )
+
+    return bg_task
 
 
 @router.get("/{document_id}/pdf")

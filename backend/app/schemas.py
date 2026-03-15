@@ -538,5 +538,6 @@ class TaskRead(BaseModel):
     message: Optional[str] = None
     document_id: Optional[str] = None
     error: Optional[str] = None
+    result: Optional[Dict[str, Any]] = None  # pdf_analyze 任務完成後的分析結果
     created_at: datetime
     model_config = ConfigDict(from_attributes=True)
