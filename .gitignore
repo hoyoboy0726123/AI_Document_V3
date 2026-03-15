@@ -12,6 +12,7 @@ backend/logs/
 backend/doc_management.db
 backend/storage/faiss_index.bin
 backend/storage/documents/
+backend/storage/tmp/
 backend/.env
 
 # Common
