@@ -1052,3 +1052,261 @@ def get_ocr_status(
         progress=progress,
         message=message
     )
+
+
+# ── 向量塊管理 ────────────────────────────────────────────────────────────────
+
+def _get_chunk_or_404(db: Session, document_id: str, chunk_id: str) -> models.DocumentChunk:
+    chunk = (
+        db.query(models.DocumentChunk)
+        .filter(
+            models.DocumentChunk.id == chunk_id,
+            models.DocumentChunk.document_id == document_id,
+        )
+        .first()
+    )
+    if not chunk:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="向量塊不存在")
+    return chunk
+
+
+def _chunk_to_read(chunk: models.DocumentChunk) -> schemas.ChunkRead:
+    return schemas.ChunkRead(
+        id=chunk.id,
+        chunk_index=chunk.chunk_index,
+        page=chunk.page,
+        paragraph_index=chunk.paragraph_index,
+        text=chunk.text,
+        char_count=len(chunk.text),
+        faiss_id=chunk.faiss_id,
+    )
+
+
+@router.get("/{document_id}/chunks", response_model=schemas.ChunkListResponse)
+def list_document_chunks(
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    doc_service = _doc_service(db)
+    _get_document_or_404(doc_service, document_id)
+
+    chunks = (
+        db.query(models.DocumentChunk)
+        .filter(models.DocumentChunk.document_id == document_id)
+        .order_by(models.DocumentChunk.chunk_index)
+        .all()
+    )
+    items = [_chunk_to_read(c) for c in chunks]
+    total_chars = sum(i.char_count for i in items)
+    return schemas.ChunkListResponse(
+        items=items,
+        total=len(items),
+        total_chars=total_chars,
+        avg_chars=total_chars // len(items) if items else 0,
+    )
+
+
+@router.post("/{document_id}/chunks", response_model=schemas.ChunkRead, status_code=status.HTTP_201_CREATED)
+def create_document_chunk(
+    document_id: str,
+    payload: schemas.ChunkCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    from ...services import vector_store
+    doc_service = _doc_service(db)
+    _get_document_or_404(doc_service, document_id)
+
+    text = (payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="文字不可為空")
+
+    max_index = (
+        db.query(func.max(models.DocumentChunk.chunk_index))
+        .filter(models.DocumentChunk.document_id == document_id)
+        .scalar()
+    ) or 0
+
+    embeddings = ai.embed_texts([text])
+    if not embeddings:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="向量化失敗")
+
+    import uuid as _uuid
+    faiss_id = int(_uuid.uuid4().int % (1 << 63))
+    chunk = models.DocumentChunk(
+        document_id=document_id,
+        chunk_index=max_index + 1,
+        page=payload.page,
+        paragraph_index=None,
+        text=text,
+        embedding=embeddings[0],
+        faiss_id=faiss_id,
+    )
+    db.add(chunk)
+    db.commit()
+    db.refresh(chunk)
+    vector_store.add_embeddings({faiss_id: embeddings[0]})
+    return _chunk_to_read(chunk)
+
+
+@router.put("/{document_id}/chunks/{chunk_id}", response_model=schemas.ChunkRead)
+def update_document_chunk(
+    document_id: str,
+    chunk_id: str,
+    payload: schemas.ChunkUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    from ...services import vector_store
+    chunk = _get_chunk_or_404(db, document_id, chunk_id)
+
+    text = (payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="文字不可為空")
+
+    # 重新向量化
+    embeddings = ai.embed_texts([text])
+    if not embeddings:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="向量化失敗")
+
+    # 更新 FAISS：先移除舊向量，再加入新向量
+    vector_store.remove_embeddings([chunk.faiss_id])
+    vector_store.add_embeddings({chunk.faiss_id: embeddings[0]})
+
+    chunk.text = text
+    chunk.embedding = embeddings[0]
+    db.commit()
+    db.refresh(chunk)
+    return _chunk_to_read(chunk)
+
+
+@router.delete("/{document_id}/chunks/{chunk_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_document_chunk(
+    document_id: str,
+    chunk_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    from ...services import vector_store
+    chunk = _get_chunk_or_404(db, document_id, chunk_id)
+    vector_store.remove_embeddings([chunk.faiss_id])
+    db.delete(chunk)
+    db.commit()
+    return None
+
+
+@router.post("/{document_id}/chunks/merge", response_model=schemas.ChunkRead, status_code=status.HTTP_201_CREATED)
+def merge_document_chunks(
+    document_id: str,
+    payload: schemas.ChunkMergeRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """合併多個 chunk 成一個，依照 chunk_index 順序合併文字。"""
+    from ...services import vector_store
+    if len(payload.chunk_ids) < 2:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="至少需要選取 2 個向量塊才能合併")
+
+    chunks = (
+        db.query(models.DocumentChunk)
+        .filter(
+            models.DocumentChunk.document_id == document_id,
+            models.DocumentChunk.id.in_(payload.chunk_ids),
+        )
+        .order_by(models.DocumentChunk.chunk_index)
+        .all()
+    )
+    if len(chunks) != len(payload.chunk_ids):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="部分向量塊不存在")
+
+    merged_text = "\n\n".join(c.text for c in chunks)
+    first_page = chunks[0].page
+    min_index = min(c.chunk_index for c in chunks)
+
+    # 向量化合併後的文字
+    embeddings = ai.embed_texts([merged_text])
+    if not embeddings:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="向量化失敗")
+
+    # 刪除舊塊
+    old_faiss_ids = [c.faiss_id for c in chunks]
+    vector_store.remove_embeddings(old_faiss_ids)
+    for c in chunks:
+        db.delete(c)
+    db.flush()
+
+    # 建立新合併塊
+    import uuid as _uuid
+    faiss_id = int(_uuid.uuid4().int % (1 << 63))
+    new_chunk = models.DocumentChunk(
+        document_id=document_id,
+        chunk_index=min_index,
+        page=first_page,
+        paragraph_index=None,
+        text=merged_text,
+        embedding=embeddings[0],
+        faiss_id=faiss_id,
+    )
+    db.add(new_chunk)
+    db.commit()
+    db.refresh(new_chunk)
+    vector_store.add_embeddings({faiss_id: embeddings[0]})
+    return _chunk_to_read(new_chunk)
+
+
+@router.post("/{document_id}/chunks/{chunk_id}/split", response_model=List[schemas.ChunkRead], status_code=status.HTTP_201_CREATED)
+def split_document_chunk(
+    document_id: str,
+    chunk_id: str,
+    payload: schemas.ChunkSplitRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """在指定字元位置將一個 chunk 拆成兩個。"""
+    from ...services import vector_store
+    chunk = _get_chunk_or_404(db, document_id, chunk_id)
+
+    if payload.split_at <= 0 or payload.split_at >= len(chunk.text):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"拆分位置必須在 1 到 {len(chunk.text) - 1} 之間",
+        )
+
+    text_a = chunk.text[:payload.split_at].strip()
+    text_b = chunk.text[payload.split_at:].strip()
+    if not text_a or not text_b:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="拆分後兩塊均不可為空")
+
+    embeddings = ai.embed_texts([text_a, text_b])
+    if len(embeddings) != 2:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="向量化失敗")
+
+    # 刪除原塊
+    vector_store.remove_embeddings([chunk.faiss_id])
+    original_index = chunk.chunk_index
+    original_page = chunk.page
+    db.delete(chunk)
+    db.flush()
+
+    import uuid as _uuid
+    result_chunks = []
+    for i, (text, emb) in enumerate(zip([text_a, text_b], embeddings)):
+        faiss_id = int(_uuid.uuid4().int % (1 << 63))
+        new_chunk = models.DocumentChunk(
+            document_id=document_id,
+            chunk_index=original_index + i,
+            page=original_page,
+            paragraph_index=None,
+            text=text,
+            embedding=emb,
+            faiss_id=faiss_id,
+        )
+        db.add(new_chunk)
+        result_chunks.append((faiss_id, emb, new_chunk))
+
+    db.commit()
+    faiss_map = {fid: emb for fid, emb, _ in result_chunks}
+    vector_store.add_embeddings(faiss_map)
+
+    return [_chunk_to_read(c) for _, _, c in result_chunks]

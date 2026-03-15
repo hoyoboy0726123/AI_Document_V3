@@ -11,6 +11,8 @@ import DocumentDetailPage from "./pages/DocumentDetailPage";
 import DocumentEditPage from "./pages/DocumentEditPage";
 import QAConsolePage from "./pages/QAConsolePage";
 import AdminPage from "./pages/AdminPage";
+import VectorSearchTestPage from "./pages/VectorSearchTestPage";
+import VectorHealthPage from "./pages/VectorHealthPage";
 import PrivateRoute from "./components/PrivateRoute";
 
 function App() {
@@ -66,9 +68,25 @@ function App() {
             />
             <Route
               path="/admin/metadata"
-              element={( 
+              element={(
                 <PrivateRoute adminOnly>
                   <AdminPage />
+                </PrivateRoute>
+              )}
+            />
+            <Route
+              path="/admin/vector-search"
+              element={(
+                <PrivateRoute adminOnly>
+                  <VectorSearchTestPage />
+                </PrivateRoute>
+              )}
+            />
+            <Route
+              path="/admin/vector-health"
+              element={(
+                <PrivateRoute adminOnly>
+                  <VectorHealthPage />
                 </PrivateRoute>
               )}
             />

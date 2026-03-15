@@ -432,3 +432,96 @@ class DocumentNoteRead(DocumentNoteBase):
 
 
 DocumentRead.model_rebuild()
+
+
+# ── 向量塊管理 ────────────────────────────────────────────────────────────────
+
+class ChunkRead(BaseModel):
+    id: str
+    chunk_index: int
+    page: Optional[int] = None
+    paragraph_index: Optional[int] = None
+    text: str
+    char_count: int
+    faiss_id: int
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ChunkCreate(BaseModel):
+    page: Optional[int] = None
+    text: str
+
+
+class ChunkUpdate(BaseModel):
+    text: str
+
+
+class ChunkListResponse(BaseModel):
+    items: List[ChunkRead]
+    total: int
+    total_chars: int
+    avg_chars: int
+
+
+class ChunkMergeRequest(BaseModel):
+    chunk_ids: List[str]  # 要合併的 chunk id 列表，按順序合併
+
+
+class ChunkSplitRequest(BaseModel):
+    split_at: int  # 字元位置
+
+
+# ── 向量查詢測試 ──────────────────────────────────────────────────────────────
+
+class VectorSearchTestRequest(BaseModel):
+    query: str
+    top_k: int = Field(default=5, ge=1, le=20)
+    min_score: float = Field(default=0.3, ge=0.0, le=1.0)
+    document_id: Optional[str] = None
+
+
+class VectorSearchTestResult(BaseModel):
+    rank: int
+    chunk_id: str
+    document_id: str
+    document_title: str
+    page: Optional[int] = None
+    score: float
+    text: str
+
+
+class VectorSearchTestResponse(BaseModel):
+    query: str
+    results: List[VectorSearchTestResult]
+    elapsed_ms: int
+
+
+# ── 向量庫健康儀表板 ──────────────────────────────────────────────────────────
+
+class DocumentChunkStat(BaseModel):
+    document_id: str
+    document_title: str
+    chunk_count: int
+    total_chars: int
+    avg_chars: int
+    empty_embedding_count: int
+
+
+class AbnormalChunk(BaseModel):
+    chunk_id: str
+    document_id: str
+    document_title: str
+    page: Optional[int] = None
+    char_count: int
+    reason: str  # "too_short" | "too_long"
+    text_preview: str
+
+
+class VectorHealthResponse(BaseModel):
+    total_chunks: int
+    total_documents: int
+    total_chars: int
+    avg_chars_per_chunk: int
+    empty_embedding_count: int
+    abnormal_chunks: List[AbnormalChunk]
+    document_stats: List[DocumentChunkStat]

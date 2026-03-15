@@ -1,6 +1,6 @@
 ﻿import React, { useMemo } from "react";
 import { Layout, Menu } from "antd";
-import { FileTextOutlined, AppstoreOutlined, SettingOutlined, RobotOutlined } from "@ant-design/icons";
+import { FileTextOutlined, AppstoreOutlined, SettingOutlined, RobotOutlined, ThunderboltOutlined, HeartOutlined } from "@ant-design/icons";
 import { useLocation, useNavigate } from "react-router-dom";
 
 const { Sider } = Layout;
@@ -14,12 +14,16 @@ const AppSidebar = () => {
     { key: "/documents/new", icon: <AppstoreOutlined />, label: "建立文件" },
     { key: "/qa", icon: <RobotOutlined />, label: "RAG智慧問答" },
     { key: "/admin/metadata", icon: <SettingOutlined />, label: "管理介面" },
+    { key: "/admin/vector-search", icon: <ThunderboltOutlined />, label: "向量查詢測試" },
+    { key: "/admin/vector-health", icon: <HeartOutlined />, label: "向量庫健康" },
   ];
 
   const selectedKey = useMemo(() => {
     if (location.pathname.startsWith("/documents/new")) return "/documents/new";
     if (location.pathname.startsWith("/documents")) return "/documents";
     if (location.pathname.startsWith("/qa")) return "/qa";
+    if (location.pathname.startsWith("/admin/vector-health")) return "/admin/vector-health";
+    if (location.pathname.startsWith("/admin/vector-search")) return "/admin/vector-search";
     if (location.pathname.startsWith("/admin")) return "/admin/metadata";
     return "/documents";
   }, [location.pathname]);

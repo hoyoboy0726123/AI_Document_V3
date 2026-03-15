@@ -17,7 +17,7 @@ setup_logging(
 )
 logger = get_logger(__name__)
 
-from .api.v1 import admin, auth, documents, metadata, rag
+from .api.v1 import admin, auth, documents, metadata, rag, vector_search
 from .core.config import settings
 from .database import SessionLocal, engine
 from .services import users as user_service
@@ -165,6 +165,7 @@ app.include_router(documents.router, prefix="/api/v1/documents", tags=["Document
 app.include_router(admin.router, prefix="/api/v1/admin", tags=["Admin"])
 app.include_router(metadata.router, prefix="/api/v1", tags=["Metadata"])
 app.include_router(rag.router, prefix="/api/v1/rag", tags=["RAG"])
+app.include_router(vector_search.router, prefix="/api/v1/vector-search", tags=["VectorSearch"])
 
 
 @app.get("/")
