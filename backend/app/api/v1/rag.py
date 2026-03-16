@@ -110,11 +110,21 @@ def query_rag(
     if not filtered:
         return schemas.RAGQueryResponse(answer="找不到符合的內容，請調整關鍵詞或過濾條件", sources=[])
 
+    # 計算頁碼間距：以最高分塊（filtered[0]）的頁碼為基準
+    primary_page = filtered[0][0].page or 0
+
     contexts: List[Dict[str, str]] = []
     sources: List[schemas.DocumentChunkSource] = []
     for chunk, score in filtered:
         doc = chunk.document
-        contexts.append({"title": doc.title, "page": chunk.page or 0, "text": chunk.text})
+        chunk_page = chunk.page or 0
+        page_gap = abs(chunk_page - primary_page) if primary_page and chunk_page else None
+        contexts.append({
+            "title": doc.title,
+            "page": chunk_page,
+            "page_gap": page_gap,
+            "text": chunk.text,
+        })
         sources.append(
             schemas.DocumentChunkSource(
                 document_id=doc.id,

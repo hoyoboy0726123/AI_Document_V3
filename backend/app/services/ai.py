@@ -193,8 +193,19 @@ def generate_rag_answer(
     if not context_blocks:
         return '查無足夠的相關內容，請提供更多文件或調整問題。'
 
+    PAGE_GAP_THRESHOLD = 5  # 頁碼差超過此值視為不同章節
+
+    def _page_label(block: Dict, idx: int) -> str:
+        page = block.get("page") or "?"
+        gap = block.get("page_gap")
+        if idx == 0 or gap is None:
+            return f"第 {page} 頁"
+        if gap <= PAGE_GAP_THRESHOLD:
+            return f"第 {page} 頁（與主要來源相鄰，頁距 {gap}）"
+        return f"第 {page} 頁 ⚠️ 頁距 {gap}，可能為不同章節"
+
     context_text = "\n\n".join(
-        f"[來源{idx + 1}] {block.get('title') or '未命名段落'} (第 {block.get('page') or '?'} 頁)\n{(block.get('text') or '').strip()}"
+        f"[來源{idx + 1}] {block.get('title') or '未命名段落'} ({_page_label(block, idx)})\n{(block.get('text') or '').strip()}"
         for idx, block in enumerate(context_blocks)
     )
 
@@ -213,6 +224,7 @@ def generate_rag_answer(
 - 盡可能完整重現參考資料中的細節（如背景、限制、程序、數值、條件），並保持語意清楚。
 - 每個[來源]的資訊相互獨立，嚴格禁止跨來源拼湊細節（例如：不可將[來源2]的數值或條件套用到[來源1]的測試項目上）。
 - 若多個來源涉及相似但不同的測試項目或主題，必須分開描述並明確標示各自來源，不可合併成同一段落。
+- 標記「⚠️ 頁距 N，可能為不同章節」的來源極可能屬於不同測試項目：若其內容與問題主題不完全吻合，優先捨棄該來源；若仍引用，必須獨立描述並加以說明其來自不同章節，不可將其數值或條件與其他來源混用。
 - 在回答文字中以 [來源1][來源3] 標示引用來源，可於同一句結尾列出多個來源。
 - 若所有段落皆無法回答，請明確回覆「查無相關資料」，並建議提供更多上下文。
 {f'- 參考對話歷史理解追問脈絡，但答案必須來自可用段落。' if history_text else ''}
