@@ -110,8 +110,18 @@ def query_rag(
     if not filtered:
         return schemas.RAGQueryResponse(answer="找不到符合的內容，請調整關鍵詞或過濾條件", sources=[])
 
-    # 計算頁碼間距：以最高分塊（filtered[0]）的頁碼為基準
+    # 頁碼連續性過濾：同一份文件內，頁距超過閾值的塊直接排除，不傳給 LLM
+    # 跨文件的塊不受此限制（不同文件本來就是獨立來源）
+    PAGE_GAP_FILTER = 5
     primary_page = filtered[0][0].page or 0
+    primary_doc_id = filtered[0][0].document_id
+
+    def _should_include(chunk, score) -> bool:
+        if chunk.document_id != primary_doc_id:
+            return True  # 不同文件來源，不過濾
+        if not primary_page or not chunk.page:
+            return True  # 頁碼缺失，無法判斷，保留
+        return abs(chunk.page - primary_page) <= PAGE_GAP_FILTER
 
     contexts: List[Dict[str, str]] = []
     sources: List[schemas.DocumentChunkSource] = []
@@ -119,6 +129,20 @@ def query_rag(
         doc = chunk.document
         chunk_page = chunk.page or 0
         page_gap = abs(chunk_page - primary_page) if primary_page and chunk_page else None
+
+        if not _should_include(chunk, score):
+            # 仍加入 sources 讓前端顯示（標記為已過濾），但不傳入 LLM context
+            sources.append(
+                schemas.DocumentChunkSource(
+                    document_id=doc.id,
+                    title=doc.title,
+                    page=chunk.page,
+                    snippet=chunk.text,
+                    score=score,
+                )
+            )
+            continue
+
         contexts.append({
             "title": doc.title,
             "page": chunk_page,

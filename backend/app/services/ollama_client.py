@@ -425,6 +425,7 @@ class OllamaClient:
         model: Optional[str] = None,
         format: Optional[Any] = None,
         options: Optional[Dict[str, Any]] = None,
+        think: bool = False,
     ) -> str:
         payload: Dict[str, Any] = {
             "model": model or self.default_model,
@@ -432,6 +433,8 @@ class OllamaClient:
             "stream": False,
             "keep_alive": self.keep_alive,
         }
+        if think:
+            payload["think"] = True
         if format:
             payload["format"] = format
         default_opts = self._default_options()

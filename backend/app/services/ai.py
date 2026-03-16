@@ -78,6 +78,7 @@ def _chat_with_ollama(
     *,
     model: Optional[str] = None,
     response_format: Optional[Any] = None,
+    think: bool = False,
 ) -> str:
     import time
     client = get_client()
@@ -86,10 +87,11 @@ def _chat_with_ollama(
         messages,
         model=model or settings.OLLAMA_LLM_MODEL,
         format=response_format,
+        think=think,
     )
     elapsed = time.time() - t0
-    logger.info("_chat_with_ollama elapsed=%.1fs output_len=%d preview=%s",
-                elapsed, len(result), repr(result[:120]))
+    logger.info("_chat_with_ollama elapsed=%.1fs think=%s output_len=%d preview=%s",
+                elapsed, think, len(result), repr(result[:120]))
     return result
 
 
@@ -246,7 +248,7 @@ def generate_rag_answer(
     return _chat_with_ollama([
         {"role": "system", "content": "請務必使用「繁體中文（台灣）」回答，嚴格禁止簡體中文。避免輸出任何控制標記或思考過程。"},
         {"role": "user", "content": prompt},
-    ])
+    ], think=True)
 
 _EMBED_MAX_CHARS = 7000  # qwen3-embedding:8b supports 8192 tokens (~7000 English chars)
 _EMBED_BATCH_SIZE = 10   # process N chunks per request to avoid timeout
