@@ -1,7 +1,8 @@
-﻿import React, { useMemo } from "react";
+import React, { useMemo } from "react";
 import { Layout, Menu } from "antd";
 import { FileTextOutlined, AppstoreOutlined, SettingOutlined, RobotOutlined, ThunderboltOutlined, HeartOutlined } from "@ant-design/icons";
 import { useLocation, useNavigate } from "react-router-dom";
+import FolderTree from "../Folders/FolderTree";
 
 const { Sider } = Layout;
 
@@ -28,16 +29,30 @@ const AppSidebar = () => {
     return "/documents";
   }, [location.pathname]);
 
+  const isDocuments = location.pathname.startsWith("/documents") && !location.pathname.startsWith("/documents/new");
+
   return (
-    <Sider width={220} theme="dark">
-      <Menu
-        theme="dark"
-        mode="inline"
-        selectedKeys={[selectedKey]}
-        items={menuItems}
-        onClick={({ key }) => navigate(key)}
-        style={{ marginTop: 16 }}
-      />
+    <Sider
+      width={220}
+      theme="dark"
+      style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}
+    >
+      <div style={{ flex: "0 0 auto" }}>
+        <Menu
+          theme="dark"
+          mode="inline"
+          selectedKeys={[selectedKey]}
+          items={menuItems}
+          onClick={({ key }) => navigate(key)}
+          style={{ marginTop: 16 }}
+        />
+      </div>
+
+      {isDocuments && (
+        <div style={{ flex: "1 1 auto", overflowY: "auto", overflowX: "hidden" }}>
+          <FolderTree />
+        </div>
+      )}
     </Sider>
   );
 };

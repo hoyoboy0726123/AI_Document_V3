@@ -130,6 +130,7 @@ class DocumentUpdate(BaseModel):
     classification_id: Optional[str] = None
     source_pdf_path: Optional[str] = None
     ai_summary: Optional[str] = None
+    folder_id: Optional[str] = None  # "__unset__" = remove from folder
 
 
 class ClassificationSummary(BaseModel):
@@ -164,6 +165,28 @@ class ClassificationRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class FolderCreate(BaseModel):
+    name: str
+    parent_id: Optional[str] = None
+    order_index: int = 0
+
+
+class FolderUpdate(BaseModel):
+    name: Optional[str] = None
+    parent_id: Optional[str] = None  # "__root__" = move to top level
+    order_index: Optional[int] = None
+
+
+class FolderRead(BaseModel):
+    id: str
+    name: str
+    parent_id: Optional[str] = None
+    order_index: int
+    created_at: datetime
+    doc_count: int = 0
+    model_config = ConfigDict(from_attributes=True)
+
+
 class DocumentRead(DocumentBase):
     id: str
     creator_id: str
@@ -180,6 +203,7 @@ class DocumentRead(DocumentBase):
     ocr_method: Optional[str] = None  # OCR方法
     full_analysis: Optional[Dict[str, Any]] = None  # 整份文件 AI 分析結果（包含初始分析和對話歷史）
     task_id: Optional[str] = None  # 背景任務 ID（VL 解析時使用）
+    folder_id: Optional[str] = None  # 所屬資料夾 ID
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 

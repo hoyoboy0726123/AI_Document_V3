@@ -1,11 +1,13 @@
 ﻿
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  Breadcrumb,
   Button,
   Card,
   Col,
   Form,
   Input,
+  Modal,
   Popconfirm,
   Row,
   Select,
@@ -17,7 +19,8 @@ import {
   List,
   Typography,
 } from 'antd';
-import { DeleteOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, DownloadOutlined, UpOutlined } from '@ant-design/icons';
+import { DeleteOutlined, FolderOpenOutlined, FolderOutlined, HomeOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, DownloadOutlined, UpOutlined } from '@ant-design/icons';
+import { useSearchParams } from 'react-router-dom';
 import apiClient from '../../services/api';
 import PdfPreviewModal from './PdfPreviewModal';
 
@@ -79,6 +82,8 @@ const KeywordList = ({ keywords }) => {
 };
 
 const DocumentList = ({ onCreate, onView }) => {
+  const [searchParams] = useSearchParams();
+  const currentFolderId = searchParams.get('folder_id') ?? null; // null = all
 
   const [loading, setLoading] = useState(false);
   const [documents, setDocuments] = useState([]);
@@ -96,6 +101,12 @@ const DocumentList = ({ onCreate, onView }) => {
   const [searching, setSearching] = useState(false);
   const [searchResults, setSearchResults] = useState([]);
   const [showSearchResults, setShowSearchResults] = useState(false);
+
+  // 資料夾相關狀態
+  const [folders, setFolders] = useState([]);
+  const [moveModalOpen, setMoveModalOpen] = useState(false);
+  const [movingDoc, setMovingDoc] = useState(null);
+  const [movingTargetFolderId, setMovingTargetFolderId] = useState(null);
 
   // PDF 預覽狀態
   const [pdfPreviewVisible, setPdfPreviewVisible] = useState(false);
@@ -116,6 +127,7 @@ const DocumentList = ({ onCreate, onView }) => {
           classification_id: filterValues.classification_id || undefined,
           project_id: filterValues.project_id || undefined,
           keywords: keywordsFilter.length > 0 ? keywordsFilter.join(',') : undefined,
+          folder_id: currentFolderId || undefined,
           ...params,
         },
       });
@@ -189,10 +201,18 @@ const DocumentList = ({ onCreate, onView }) => {
     } catch {}
   };
 
+  const fetchFolders = async () => {
+    try {
+      const resp = await apiClient.get('folders');
+      setFolders(resp.data ?? []);
+    } catch {}
+  };
+
   useEffect(() => {
     fetchMetadataFields();
     fetchFilterOptions();
     fetchClassifications();
+    fetchFolders();
   }, []);
 
   // Also extract options from current-page documents whenever they load
@@ -204,7 +224,7 @@ const DocumentList = ({ onCreate, onView }) => {
   useEffect(() => {
     fetchDocuments();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize, keywordsFilter]);
+  }, [page, pageSize, keywordsFilter, currentFolderId]);
 
   const handleSearch = () => {
     setPage(1);
@@ -317,6 +337,41 @@ const DocumentList = ({ onCreate, onView }) => {
     return option ? option.display_value : value;
   };
 
+  // Build breadcrumb path for the current folder
+  const buildBreadcrumb = () => {
+    if (!currentFolderId || currentFolderId === '__root__') return null;
+    const folderMap = {};
+    folders.forEach((f) => { folderMap[f.id] = f; });
+    const path = [];
+    let cur = folderMap[currentFolderId];
+    while (cur) {
+      path.unshift(cur);
+      cur = cur.parent_id ? folderMap[cur.parent_id] : null;
+    }
+    return path;
+  };
+
+  const handleMoveDoc = async (record) => {
+    setMovingDoc(record);
+    setMovingTargetFolderId(record.folder_id ?? null);
+    await fetchFolders(); // always get latest folders
+    setMoveModalOpen(true);
+  };
+
+  const handleMoveConfirm = async () => {
+    if (!movingDoc) return;
+    try {
+      await apiClient.put(`documents/${movingDoc.id}`, {
+        folder_id: movingTargetFolderId ?? '__unset__',
+      });
+      message.success('已移動文件');
+      setMoveModalOpen(false);
+      fetchDocuments();
+    } catch (err) {
+      message.error(err.response?.data?.detail ?? '移動失敗');
+    }
+  };
+
   const handleDownload = async (record) => {
     try {
       const response = await apiClient.get(`documents/${record.id}/pdf`, {
@@ -406,6 +461,12 @@ const DocumentList = ({ onCreate, onView }) => {
           >
             下載
           </Button>
+          <Button
+            size="small"
+            icon={<FolderOutlined />}
+            onClick={() => handleMoveDoc(record)}
+            title="移至資料夾"
+          />
           <Popconfirm
             title="確認刪除"
             description="確定要刪除此文件嗎？此操作將同時刪除相關的向量資料和 PDF 檔案，無法復原。"
@@ -437,6 +498,49 @@ const DocumentList = ({ onCreate, onView }) => {
         </Space>
       }
     >
+      {/* 路徑麵包屑 */}
+      {(() => {
+        const path = buildBreadcrumb();
+        const items = [
+          {
+            title: (
+              <span style={{ cursor: 'pointer' }}>
+                <HomeOutlined /> 全部文件
+              </span>
+            ),
+            href: '/documents',
+          },
+        ];
+        if (currentFolderId === '__root__') {
+          items.push({ title: <span><FolderOpenOutlined /> 未歸類</span> });
+        } else if (path) {
+          path.forEach((f, i) => {
+            items.push({
+              title: (
+                <span>
+                  <FolderOpenOutlined /> {f.name}
+                </span>
+              ),
+            });
+          });
+        }
+        return (
+          <div
+            style={{
+              background: '#f5f5f5',
+              border: '1px solid #e8e8e8',
+              borderRadius: 4,
+              padding: '6px 12px',
+              marginBottom: 12,
+              display: 'flex',
+              alignItems: 'center',
+            }}
+          >
+            <Breadcrumb items={items} style={{ fontSize: 13 }} />
+          </div>
+        );
+      })()}
+
       {/* 第一行：跨文件全文檢索 + 關鍵字標籤篩選 */}
       <Row gutter={16} style={{ marginBottom: 12 }}>
         <Col xs={24} md={12}>
@@ -560,6 +664,29 @@ const DocumentList = ({ onCreate, onView }) => {
           },
         }}
       />
+
+      {/* 移至資料夾 Modal */}
+      <Modal
+        title={`移動「${movingDoc?.title ?? ''}」至資料夾`}
+        open={moveModalOpen}
+        onOk={handleMoveConfirm}
+        onCancel={() => setMoveModalOpen(false)}
+        okText="移動"
+        cancelText="取消"
+      >
+        <Select
+          style={{ width: '100%' }}
+          allowClear
+          placeholder="選擇目標資料夾（清除表示移出所有資料夾）"
+          value={movingTargetFolderId}
+          onChange={setMovingTargetFolderId}
+          options={[
+            ...folders.map((f) => ({ label: f.name, value: f.id })),
+          ]}
+          showSearch
+          optionFilterProp="label"
+        />
+      </Modal>
 
       {/* PDF 預覽 Modal */}
       <PdfPreviewModal

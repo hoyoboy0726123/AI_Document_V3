@@ -160,6 +160,7 @@ def list_documents(
     file_type: Optional[str] = None,
     project_id: Optional[str] = None,
     keywords: Optional[str] = None,
+    folder_id: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -179,6 +180,7 @@ def list_documents(
         search_term=search_term,
         classification_id=classification_id,
         metadata_filters=metadata_filters or None,
+        folder_id=folder_id,
     )
     return schemas.DocumentListResponse(items=documents, total=total, page=page, page_size=page_size)
 
@@ -490,6 +492,16 @@ def update_document(
 
     # Validate and get classification category
     classification = ClassificationValidator.get_active_or_none(db, payload.classification_id)
+
+    # Handle folder assignment
+    if payload.folder_id is not None:
+        if payload.folder_id == "__unset__":
+            document.folder_id = None
+        else:
+            folder = db.query(models.Folder).filter(models.Folder.id == payload.folder_id).first()
+            if not folder:
+                raise HTTPException(status_code=404, detail="資料夾不存在")
+            document.folder_id = folder.id
 
     updated = doc_service.update(
         document,

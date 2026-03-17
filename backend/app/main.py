@@ -17,7 +17,7 @@ setup_logging(
 )
 logger = get_logger(__name__)
 
-from .api.v1 import admin, auth, documents, metadata, rag, tasks, vector_search
+from .api.v1 import admin, auth, documents, folders, metadata, rag, tasks, vector_search
 from .core.config import settings
 from .database import SessionLocal, engine
 from .services import users as user_service
@@ -74,6 +74,10 @@ def ensure_schema_updates() -> None:
             if "ocr_method" not in doc_columns:
                 logger.info("Adding ocr_method column to documents table")
                 connection.execute(text("ALTER TABLE documents ADD COLUMN ocr_method VARCHAR(50)"))
+
+            if "folder_id" not in doc_columns:
+                logger.info("Adding folder_id column to documents table")
+                connection.execute(text("ALTER TABLE documents ADD COLUMN folder_id VARCHAR(36) REFERENCES folders(id)"))
 
         # Check document_chunks table columns
         if inspector.has_table('document_chunks'):
@@ -178,6 +182,7 @@ app.include_router(metadata.router, prefix="/api/v1", tags=["Metadata"])
 app.include_router(rag.router, prefix="/api/v1/rag", tags=["RAG"])
 app.include_router(vector_search.router, prefix="/api/v1/vector-search", tags=["VectorSearch"])
 app.include_router(tasks.router, prefix="/api/v1/tasks", tags=["Tasks"])
+app.include_router(folders.router, prefix="/api/v1/folders", tags=["Folders"])
 
 
 @app.get("/")

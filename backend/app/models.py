@@ -79,6 +79,18 @@ class ClassificationCategory(BaseMixin, Base):
     documents: Mapped[List["Document"]] = relationship("Document", back_populates="classification")
 
 
+class Folder(BaseMixin, Base):
+    __tablename__ = "folders"
+
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    parent_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("folders.id"), nullable=True, index=True
+    )
+    order_index: Mapped[int] = mapped_column(Integer, default=0)
+
+    documents: Mapped[List["Document"]] = relationship("Document", back_populates="folder")
+
+
 class Document(BaseMixin, Base):
     __tablename__ = "documents"
 
@@ -106,8 +118,12 @@ class Document(BaseMixin, Base):
         nullable=False
     )  # not_needed, pending, processing, completed, failed, skipped
     ocr_method: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # gemini_vision
+    folder_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("folders.id"), nullable=True, index=True
+    )
 
     creator: Mapped[User] = relationship("User", back_populates="documents")
+    folder: Mapped[Optional["Folder"]] = relationship("Folder", back_populates="documents")
     classification: Mapped[Optional[ClassificationCategory]] = relationship(
         "ClassificationCategory", back_populates="documents"
     )

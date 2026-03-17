@@ -44,6 +44,7 @@ class DocumentService:
         search_term: Optional[str] = None,
         classification_id: Optional[str] = None,
         metadata_filters: Optional[Dict[str, Any]] = None,
+        folder_id: Optional[str] = None,
     ) -> Tuple[List[models.Document], int]:
         query = (
             self.db.query(models.Document)
@@ -58,6 +59,12 @@ class DocumentService:
 
         if classification_id:
             query = query.filter(models.Document.classification_id == classification_id)
+
+        if folder_id is not None:
+            if folder_id == "__root__":
+                query = query.filter(models.Document.folder_id == None)  # noqa: E711
+            else:
+                query = query.filter(models.Document.folder_id == folder_id)
 
         documents = query.order_by(models.Document.created_at.desc()).all()
 

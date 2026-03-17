@@ -1,0 +1,39 @@
+/* Dark-theme overrides for Ant Design Tree inside the sidebar */
+.folder-tree-dark .ant-tree {
+  background: transparent !important;
+  color: rgba(255, 255, 255, 0.85) !important;
+}
+
+.folder-tree-dark .ant-tree-treenode {
+  padding: 0 !important;
+}
+
+.folder-tree-dark .ant-tree-node-content-wrapper {
+  color: rgba(255, 255, 255, 0.85) !important;
+  border-radius: 4px !important;
+}
+
+.folder-tree-dark .ant-tree-node-content-wrapper:hover {
+  background: rgba(255, 255, 255, 0.08) !important;
+}
+
+.folder-tree-dark .ant-tree-node-content-wrapper.ant-tree-node-selected {
+  background: #1677ff !important;
+}
+
+.folder-tree-dark .ant-tree-switcher {
+  color: rgba(255, 255, 255, 0.45) !important;
+  background: transparent !important;
+}
+
+.folder-tree-dark .ant-tree-switcher:hover {
+  background: rgba(255, 255, 255, 0.08) !important;
+}
+
+.folder-tree-dark .ant-tree-indent-unit::before {
+  border-right-color: rgba(255, 255, 255, 0.12) !important;
+}
+
+.folder-tree-dark .ant-tree-draggable-icon {
+  color: rgba(255, 255, 255, 0.3) !important;
+}
