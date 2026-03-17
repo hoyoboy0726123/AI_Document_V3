@@ -13,6 +13,7 @@ import {
   Select,
   Space,
   Tag,
+  TreeSelect,
   Typography,
   Divider,
   Alert,
@@ -37,6 +38,7 @@ const QAConsolePage = () => {
   const [classifications, setClassifications] = useState([]);
   const [projectOptions, setProjectOptions] = useState([]);
   const [documents, setDocuments] = useState([]);
+  const [folders, setFolders] = useState([]);
   const [pdfPreview, setPdfPreview] = useState({ open: false, documentId: null, title: "", page: 1 });
   const [followupQuestion, setFollowupQuestion] = useState("");
   const [expandedSnippets, setExpandedSnippets] = useState({});
@@ -56,21 +58,21 @@ const QAConsolePage = () => {
   };
 
   const loadInitialData = async () => {
-    try {
-      const [classificationResp, metadataResp, documentsResp] = await Promise.all([
-        apiClient.get("documents/classifications"),
-        apiClient.get("metadata-fields"),
-        apiClient.get("documents", { params: { page: 1, page_size: 200 } }),
-      ]);
+    const [classificationRes, metadataRes, documentsRes, foldersRes] = await Promise.allSettled([
+      apiClient.get("documents/classifications"),
+      apiClient.get("metadata-fields"),
+      apiClient.get("documents/", { params: { page: 1, page_size: 200 } }),
+      apiClient.get("folders"),
+    ]);
 
-      setClassifications(classificationResp.data ?? []);
-      const fields = metadataResp.data ?? [];
-      const projectField = fields.find((field) => field.name === "project_id");
+    if (classificationRes.status === "fulfilled") setClassifications(classificationRes.value.data ?? []);
+    if (metadataRes.status === "fulfilled") {
+      const fields = metadataRes.value.data ?? [];
+      const projectField = fields.find((f) => f.name === "project_id");
       setProjectOptions(projectField?.options ?? []);
-      setDocuments(documentsResp.data?.items ?? []);
-    } catch (error) {
-      message.error(error.response?.data?.detail ?? "初始化載入失敗");
     }
+    if (documentsRes.status === "fulfilled") setDocuments(documentsRes.value.data?.items ?? []);
+    if (foldersRes.status === "fulfilled") setFolders(foldersRes.value.data ?? []);
   };
 
   useEffect(() => {
@@ -208,12 +210,14 @@ const QAConsolePage = () => {
   const handleSubmit = async (values) => {
     const question = values.question?.trim();
     if (!question) { message.warning("請輸入問題"); return; }
+    const { document_id, folder_ids } = decodeDocScope(values.doc_scope);
     const payload = {
       question,
       top_k: values.top_k ?? 5,
       classification_id: values.classification_id || null,
       project_id: values.project_id || null,
-      document_id: values.document_id || null,
+      document_id,
+      folder_ids,
       conversation_history: conversationHistory,
       use_ai_fallback: false,
       skip_ai_understanding: true,
@@ -226,12 +230,14 @@ const QAConsolePage = () => {
     const question = followupQuestion?.trim();
     if (!question) { message.warning("請輸入追問內容"); return; }
     const currentFormValues = form.getFieldsValue();
+    const { document_id, folder_ids } = decodeDocScope(currentFormValues.doc_scope);
     const payload = {
       question,
       top_k: currentFormValues.top_k ?? 5,
       classification_id: currentFormValues.classification_id || null,
       project_id: currentFormValues.project_id || null,
-      document_id: currentFormValues.document_id || null,
+      document_id,
+      folder_ids,
       conversation_history: conversationHistory,
       use_ai_fallback: false,
       skip_ai_understanding: false,
@@ -242,12 +248,14 @@ const QAConsolePage = () => {
 
   const handleAiFallback = async (question) => {
     const currentFormValues = form.getFieldsValue();
+    const { document_id, folder_ids } = decodeDocScope(currentFormValues.doc_scope);
     const payload = {
       question,
       top_k: currentFormValues.top_k ?? 5,
       classification_id: currentFormValues.classification_id || null,
       project_id: currentFormValues.project_id || null,
-      document_id: currentFormValues.document_id || null,
+      document_id,
+      folder_ids,
       conversation_history: conversationHistory,
       use_ai_fallback: true,
     };
@@ -285,6 +293,85 @@ const QAConsolePage = () => {
     setPdfPreview({ open: true, documentId: source.document_id, title: source.title, page });
   };
 
+  // Build TreeSelect data
+  const [docScopeExpandedKeys, setDocScopeExpandedKeys] = useState(["__all_docs__"]);
+
+  const documentTreeData = useMemo(() => {
+    // Folder subtree
+    const folderMap = {};
+    folders.forEach((f) => {
+      folderMap[f.id] = {
+        title: f.name,
+        value: `folder:${f.id}`,
+        key: `folder:${f.id}`,
+        children: [],
+      };
+    });
+    const folderRoots = [];
+    folders.forEach((f) => {
+      if (f.parent_id && folderMap[f.parent_id]) {
+        folderMap[f.parent_id].children.push(folderMap[f.id]);
+      } else {
+        folderRoots.push(folderMap[f.id]);
+      }
+    });
+
+    // All documents as leaf nodes
+    const allDocLeaves = documents.map((doc) => ({
+      title: doc.title,
+      value: `doc:${doc.id}`,
+      key: `doc:${doc.id}`,
+      isLeaf: true,
+    }));
+
+    const result = [];
+    if (allDocLeaves.length > 0) {
+      result.push({
+        title: `所有文件 (${allDocLeaves.length})`,
+        value: "__all_docs__",
+        key: "__all_docs__",
+        disabled: true,
+        children: allDocLeaves,
+      });
+    }
+    if (folderRoots.length > 0) {
+      result.push({
+        title: "依資料夾篩選",
+        value: "__folders__",
+        key: "__folders__",
+        disabled: true,
+        children: folderRoots,
+      });
+    }
+    return result;
+  }, [folders, documents]);
+
+  // Expand "所有文件" and all folder nodes when data loads
+  useEffect(() => {
+    const keys = ["__all_docs__", "__folders__", ...folders.map((f) => `folder:${f.id}`)];
+    setDocScopeExpandedKeys(keys);
+  }, [folders, documents]);
+
+  // Get all descendant folder IDs (including the folder itself)
+  const getDescendantFolderIds = (folderId, allFolders) => {
+    const result = [folderId];
+    allFolders.filter((f) => f.parent_id === folderId).forEach((child) => {
+      result.push(...getDescendantFolderIds(child.id, allFolders));
+    });
+    return result;
+  };
+
+  // Decode doc_scope selection to { document_id, folder_ids }
+  const decodeDocScope = (selection) => {
+    if (!selection) return { document_id: null, folder_ids: null };
+    if (selection.startsWith("doc:")) return { document_id: selection.slice(4), folder_ids: null };
+    if (selection.startsWith("folder:")) {
+      const fid = selection.slice(7);
+      return { document_id: null, folder_ids: getDescendantFolderIds(fid, folders) };
+    }
+    return { document_id: null, folder_ids: null };
+  };
+
   const classificationOptions = useMemo(
     () => classifications.map((item) => ({ value: item.id, label: item.code ? `${item.name} (${item.code})` : item.name })),
     [classifications]
@@ -293,11 +380,6 @@ const QAConsolePage = () => {
     () => projectOptions.map((item) => ({ value: item.value, label: item.display_value })),
     [projectOptions]
   );
-  const documentSelectOptions = useMemo(
-    () => documents.map((item) => ({ value: item.id, label: item.title })),
-    [documents]
-  );
-
   // Shared ReactMarkdown components for styled table rendering
   const markdownComponents = {
     table: ({ node, ...props }) => (
@@ -410,8 +492,19 @@ const QAConsolePage = () => {
               <Form.Item name="project_id" label="專案">
                 <Select allowClear showSearch placeholder="選擇專案（可留空）" options={projectSelectOptions} optionFilterProp="label" />
               </Form.Item>
-              <Form.Item name="document_id" label="文件">
-                <Select allowClear showSearch placeholder="選擇文件（可留空）" options={documentSelectOptions} optionFilterProp="label" />
+              <Form.Item name="doc_scope" label="資料夾 / 文件">
+                <TreeSelect
+                  allowClear
+                  showSearch
+                  treeNodeFilterProp="title"
+                  placeholder="選擇資料夾或特定文件（可留空）"
+                  treeData={documentTreeData}
+                  treeExpandedKeys={docScopeExpandedKeys}
+                  onTreeExpand={setDocScopeExpandedKeys}
+                  listHeight={400}
+                  getPopupContainer={() => document.body}
+                  style={{ width: "100%" }}
+                />
               </Form.Item>
               <Form.Item name="top_k" label="來源筆數">
                 <InputNumber min={1} max={10} style={{ width: "100%" }} />

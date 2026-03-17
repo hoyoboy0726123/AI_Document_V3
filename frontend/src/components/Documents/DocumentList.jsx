@@ -19,7 +19,7 @@ import {
   List,
   Typography,
 } from 'antd';
-import { DeleteOutlined, FolderOpenOutlined, FolderOutlined, HomeOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, DownloadOutlined, UpOutlined } from '@ant-design/icons';
+import { DeleteOutlined, FolderOpenOutlined, FolderOutlined, HomeOutlined, SearchOutlined, DownloadOutlined, UpOutlined } from '@ant-design/icons';
 import { useSearchParams } from 'react-router-dom';
 import apiClient from '../../services/api';
 import PdfPreviewModal from './PdfPreviewModal';
@@ -526,19 +526,7 @@ const DocumentList = ({ onCreate, onView }) => {
   ];
 
   return (
-    <Card
-      title="文件列表"
-      extra={
-        <Space>
-          <Button icon={<ReloadOutlined />} onClick={() => fetchDocuments()}>
-            重新整理
-          </Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => onCreate?.()}>
-            建立文件
-          </Button>
-        </Space>
-      }
-    >
+    <Card>
       {/* 路徑麵包屑 */}
       {(() => {
         const path = buildBreadcrumb();

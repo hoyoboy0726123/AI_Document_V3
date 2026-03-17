@@ -103,6 +103,8 @@ def query_rag(
             continue
         if payload.project_id and not _project_matches(doc.metadata_data or {}, payload.project_id):
             continue
+        if payload.folder_ids and doc.folder_id not in payload.folder_ids:
+            continue
         filtered.append((chunk, score))
         if len(filtered) >= payload.top_k:
             break
@@ -243,6 +245,8 @@ def query_stream(
         if payload.classification_id and doc.classification_id != payload.classification_id:
             continue
         if payload.project_id and not _project_matches(doc.metadata_data or {}, payload.project_id):
+            continue
+        if payload.folder_ids and doc.folder_id not in payload.folder_ids:
             continue
         filtered.append((chunk, score))
         if len(filtered) >= top_k:

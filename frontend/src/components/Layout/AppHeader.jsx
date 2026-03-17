@@ -1,12 +1,36 @@
-﻿import React from "react";
+import React, { useMemo } from "react";
 import { Layout, Typography, Button } from "antd";
+import { useLocation } from "react-router-dom";
 import useAuthStore from "../../stores/authStore";
 
 const { Header } = Layout;
 const { Title, Text } = Typography;
 
+const PAGE_TITLES = {
+  "/documents/new": "建立文件",
+  "/documents": "文件列表",
+  "/qa": "RAG 智慧問答",
+  "/admin/vector-health": "向量庫健康",
+  "/admin/vector-search": "向量查詢測試",
+  "/admin": "管理介面",
+};
+
 const AppHeader = () => {
   const { user, logout } = useAuthStore();
+  const location = useLocation();
+
+  const pageTitle = useMemo(() => {
+    const path = location.pathname;
+    if (path.startsWith("/documents/new")) return "建立文件";
+    if (path.match(/\/documents\/[^/]+\/edit/)) return "編輯文件";
+    if (path.match(/\/documents\/[^/]+/)) return "文件詳情";
+    if (path.startsWith("/documents")) return "文件列表";
+    if (path.startsWith("/qa")) return "RAG 智慧問答";
+    if (path.startsWith("/admin/vector-health")) return "向量庫健康";
+    if (path.startsWith("/admin/vector-search")) return "向量查詢測試";
+    if (path.startsWith("/admin")) return "管理介面";
+    return "";
+  }, [location.pathname]);
 
   const handleLogout = () => {
     logout();
@@ -25,7 +49,7 @@ const AppHeader = () => {
       }}
     >
       <Title level={4} style={{ margin: 0 }}>
-        智慧文件管理系統
+        {pageTitle}
       </Title>
       <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>

@@ -294,6 +294,7 @@ class RAGQueryRequest(BaseModel):
     classification_id: Optional[str] = None
     project_id: Optional[str] = None
     document_id: Optional[str] = None
+    folder_ids: Optional[List[str]] = None  # 資料夾範圍過濾（含所有子資料夾）
     # 對話歷史（用於追問）
     conversation_history: List[ConversationMessage] = Field(default_factory=list)
     # 當找不到相關文件時，是否使用 AI 自身知識回答

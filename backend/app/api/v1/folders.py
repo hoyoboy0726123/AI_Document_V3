@@ -10,6 +10,22 @@ from ...database import get_db
 router = APIRouter()
 
 
+def _unique_name(db: Session, base_name: str, parent_id: Optional[str], exclude_id: Optional[str] = None) -> str:
+    """Return base_name, or base_name (N) if a sibling with that name already exists."""
+    q = db.query(models.Folder.name).filter(
+        models.Folder.parent_id == parent_id,
+    )
+    if exclude_id:
+        q = q.filter(models.Folder.id != exclude_id)
+    existing = {row[0] for row in q.all()}
+    if base_name not in existing:
+        return base_name
+    n = 1
+    while f"{base_name} ({n})" in existing:
+        n += 1
+    return f"{base_name} ({n})"
+
+
 def _get_folder_or_404(db: Session, folder_id: str) -> models.Folder:
     folder = db.query(models.Folder).filter(models.Folder.id == folder_id).first()
     if not folder:
@@ -60,9 +76,11 @@ def create_folder(
     if payload.parent_id:
         _get_folder_or_404(db, payload.parent_id)
 
+    pid = payload.parent_id or None
+    name = _unique_name(db, payload.name.strip(), pid)
     folder = models.Folder(
-        name=payload.name.strip(),
-        parent_id=payload.parent_id or None,
+        name=name,
+        parent_id=pid,
         order_index=payload.order_index,
     )
     db.add(folder)
@@ -84,7 +102,7 @@ def update_folder(
     folder = _get_folder_or_404(db, folder_id)
 
     if payload.name is not None:
-        folder.name = payload.name.strip()
+        folder.name = _unique_name(db, payload.name.strip(), folder.parent_id, exclude_id=folder_id)
     if payload.order_index is not None:
         folder.order_index = payload.order_index
     if payload.parent_id is not None:

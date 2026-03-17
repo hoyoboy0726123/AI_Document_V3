@@ -29,30 +29,81 @@ const AppSidebar = () => {
     return "/documents";
   }, [location.pathname]);
 
-  const isDocuments = location.pathname.startsWith("/documents") && !location.pathname.startsWith("/documents/new");
+  const isDocuments =
+    location.pathname.startsWith("/documents") &&
+    !location.pathname.startsWith("/documents/new");
 
   return (
     <Sider
       width={220}
       theme="dark"
-      style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100vh",
+        overflow: "hidden",
+        position: "sticky",
+        top: 0,
+      }}
     >
-      <div style={{ flex: "0 0 auto" }}>
+      {/* 品牌標題 — 固定在頂部 */}
+      <div
+        style={{
+          padding: "20px 16px 16px",
+          color: "#fff",
+          fontSize: 22,
+          fontWeight: 800,
+          letterSpacing: 0.5,
+          lineHeight: 1.3,
+          borderBottom: "1px solid rgba(255,255,255,0.1)",
+          flexShrink: 0,
+        }}
+      >
+        智慧文件管理系統
+      </div>
+
+      {/* 導航選單 — 固定高度 */}
+      <div style={{ flexShrink: 0 }}>
         <Menu
           theme="dark"
           mode="inline"
           selectedKeys={[selectedKey]}
           items={menuItems}
           onClick={({ key }) => navigate(key)}
-          style={{ marginTop: 16 }}
+          style={{ marginTop: 4 }}
         />
       </div>
 
+      {/* 資料夾樹 — 限高可捲動區域（約10個資料夾高），版本號固定在其下方 */}
       {isDocuments && (
-        <div style={{ flex: "1 1 auto", overflowY: "auto", overflowX: "hidden" }}>
+        <div
+          style={{
+            maxHeight: "calc(10 * 32px)",
+            overflowY: "auto",
+            overflowX: "hidden",
+            flexShrink: 0,
+          }}
+        >
           <FolderTree />
         </div>
       )}
+
+      {/* 彈性空白，讓版本號沉到底部 */}
+      <div style={{ flex: 1 }} />
+
+      {/* 版本號 — 永遠固定在最底部 */}
+      <div
+        style={{
+          padding: "10px 16px",
+          color: "rgba(255,255,255,0.3)",
+          fontSize: 12,
+          borderTop: "1px solid rgba(255,255,255,0.08)",
+          flexShrink: 0,
+          letterSpacing: 0.5,
+        }}
+      >
+        版本號：V1
+      </div>
     </Sider>
   );
 };
