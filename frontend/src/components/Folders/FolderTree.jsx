@@ -15,34 +15,28 @@ import apiClient from "../../services/api";
 
 const { DirectoryTree } = Tree;
 
+// Compute recursive doc count (folder itself + all descendants)
+function computeRecursiveCount(node) {
+  const childSum = (node.children || []).reduce(
+    (sum, child) => sum + computeRecursiveCount(child),
+    0
+  );
+  node.recursiveCount = node.docCount + childSum;
+  return node.recursiveCount;
+}
+
 // Build Ant Design Tree treeData from flat folder list
-function buildTree(folders, counts = {}) {
+function buildTree(folders, totalCount = 0, unassignedCount = 0) {
   const map = {};
   const roots = [];
-
-  // Virtual "全部文件" root node
-  const allNode = {
-    key: "__all__",
-    title: "全部文件",
-    isLeaf: false,
-    isVirtual: true,
-    selectable: true,
-  };
-  // Virtual "未分類" node
-  const unclassNode = {
-    key: "__root__",
-    title: "未歸類",
-    isLeaf: true,
-    isVirtual: true,
-    selectable: true,
-  };
 
   folders.forEach((f) => {
     map[f.id] = {
       key: f.id,
       title: f.name,
       folder: f,
-      docCount: counts[f.id] || f.doc_count || 0,
+      docCount: f.doc_count || 0,
+      recursiveCount: f.doc_count || 0,
       children: [],
       isLeaf: false,
       selectable: true,
@@ -67,6 +61,26 @@ function buildTree(folders, counts = {}) {
   };
   sortNodes(roots);
 
+  // Bottom-up pass: compute recursive counts
+  roots.forEach((r) => computeRecursiveCount(r));
+
+  const allNode = {
+    key: "__all__",
+    title: "全部文件",
+    docCount: totalCount,
+    isLeaf: false,
+    isVirtual: true,
+    selectable: true,
+  };
+  const unclassNode = {
+    key: "__root__",
+    title: "未歸類",
+    docCount: unassignedCount,
+    isLeaf: true,
+    isVirtual: true,
+    selectable: true,
+  };
+
   return [allNode, ...roots, unclassNode];
 }
 
@@ -87,6 +101,8 @@ const FolderTree = ({ style }) => {
   const [folders, setFolders] = useState([]);
   const [treeData, setTreeData] = useState([]);
   const [expandedKeys, setExpandedKeys] = useState(["__all__"]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [unassignedCount, setUnassignedCount] = useState(0);
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
 
@@ -103,8 +119,14 @@ const FolderTree = ({ style }) => {
 
   const fetchFolders = useCallback(async () => {
     try {
-      const resp = await apiClient.get("folders");
-      setFolders(resp.data ?? []);
+      const [foldersResp, totalResp, unassignedResp] = await Promise.all([
+        apiClient.get("folders"),
+        apiClient.get("documents/", { params: { page: 1, page_size: 1 } }),
+        apiClient.get("documents/", { params: { page: 1, page_size: 1, folder_id: "__root__" } }),
+      ]);
+      setFolders(foldersResp.data ?? []);
+      setTotalCount(totalResp.data?.total ?? 0);
+      setUnassignedCount(unassignedResp.data?.total ?? 0);
     } catch {
       // silent
     }
@@ -115,14 +137,13 @@ const FolderTree = ({ style }) => {
   }, [fetchFolders]);
 
   useEffect(() => {
-    const tree = buildTree(folders);
+    const tree = buildTree(folders, totalCount, unassignedCount);
     setTreeData(tree);
-    // Auto-expand every folder node so nested sub-folders are always visible
     setExpandedKeys((prev) => {
       const all = new Set([...prev, ...getAllKeys(tree)]);
       return [...all];
     });
-  }, [folders]);
+  }, [folders, totalCount, unassignedCount]);
 
   useEffect(() => {
     if (modalOpen) setTimeout(() => inputRef.current?.focus(), 100);
@@ -227,6 +248,11 @@ const FolderTree = ({ style }) => {
       return (
         <span style={{ color: "rgba(255,255,255,0.65)", fontSize: 13 }}>
           {nodeData.title}
+          {nodeData.docCount > 0 && (
+            <span style={{ color: "rgba(255,255,255,0.35)", fontSize: 11, marginLeft: 4 }}>
+              ({nodeData.docCount})
+            </span>
+          )}
         </span>
       );
     }
@@ -253,10 +279,12 @@ const FolderTree = ({ style }) => {
       },
     ];
 
+    // Show recursive count (folder itself + all sub-folders)
+    const displayCount = nodeData.recursiveCount ?? nodeData.docCount;
     const countLabel =
-      nodeData.docCount > 0 ? (
+      displayCount > 0 ? (
         <span style={{ color: "rgba(255,255,255,0.35)", fontSize: 11, marginLeft: 4 }}>
-          ({nodeData.docCount})
+          ({displayCount})
         </span>
       ) : null;
 

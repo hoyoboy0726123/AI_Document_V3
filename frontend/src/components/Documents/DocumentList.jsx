@@ -1,5 +1,5 @@
 ﻿
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useRef, useMemo, useState } from 'react';
 import {
   Breadcrumb,
   Button,
@@ -25,6 +25,23 @@ import apiClient from '../../services/api';
 import PdfPreviewModal from './PdfPreviewModal';
 
 const DEFAULT_PAGE_SIZE = 10;
+
+// Recursively collect a folder's ID and all its descendant IDs
+function getDescendantIds(folderId, allFolders) {
+  const ids = [folderId];
+  allFolders
+    .filter((f) => f.parent_id === folderId)
+    .forEach((child) => ids.push(...getDescendantIds(child.id, allFolders)));
+  return ids;
+}
+
+// Build API folder filter params from a folder selection
+function buildFolderParam(currentFolderId, allFolders) {
+  if (!currentFolderId) return {};
+  if (currentFolderId === '__root__') return { folder_id: '__root__' };
+  const ids = getDescendantIds(currentFolderId, allFolders);
+  return ids.length > 0 ? { folder_ids: ids.join(',') } : {};
+}
 
 const KeywordList = ({ keywords }) => {
   const [expanded, setExpanded] = useState(false);
@@ -104,6 +121,7 @@ const DocumentList = ({ onCreate, onView }) => {
 
   // 資料夾相關狀態
   const [folders, setFolders] = useState([]);
+  const foldersRef = useRef([]); // always up-to-date without dep-array issues
   const [moveModalOpen, setMoveModalOpen] = useState(false);
   const [movingDoc, setMovingDoc] = useState(null);
   const [movingTargetFolderId, setMovingTargetFolderId] = useState(null);
@@ -119,6 +137,8 @@ const DocumentList = ({ onCreate, onView }) => {
     try {
       setLoading(true);
       const filterValues = filterForm.getFieldsValue();
+      const folderParam = buildFolderParam(currentFolderId, foldersRef.current);
+
       const resp = await apiClient.get('documents/', {
         params: {
           page,
@@ -127,7 +147,7 @@ const DocumentList = ({ onCreate, onView }) => {
           classification_id: filterValues.classification_id || undefined,
           project_id: filterValues.project_id || undefined,
           keywords: keywordsFilter.length > 0 ? keywordsFilter.join(',') : undefined,
-          folder_id: currentFolderId || undefined,
+          ...folderParam,
           ...params,
         },
       });
@@ -183,10 +203,12 @@ const DocumentList = ({ onCreate, onView }) => {
       });
   };
 
-  // Fetch all docs (large page) to populate filter options comprehensively
-  const fetchFilterOptions = async () => {
+  // Fetch docs to populate filter options, scoped to current folder if applicable
+  const fetchFilterOptions = async (folderParam = {}) => {
     try {
-      const resp = await apiClient.get('documents/', { params: { page: 1, page_size: 500 } });
+      const resp = await apiClient.get('documents/', {
+        params: { page: 1, page_size: 500, ...folderParam },
+      });
       const docs = resp.data?.items ?? [];
       extractAndMergeOptions(docs);
     } catch (error) {
@@ -204,15 +226,21 @@ const DocumentList = ({ onCreate, onView }) => {
   const fetchFolders = async () => {
     try {
       const resp = await apiClient.get('folders');
-      setFolders(resp.data ?? []);
+      const data = resp.data ?? [];
+      setFolders(data);
+      foldersRef.current = data;
     } catch {}
   };
 
   useEffect(() => {
     fetchMetadataFields();
-    fetchFilterOptions();
     fetchClassifications();
-    fetchFolders();
+    fetchFolders().then(() => {
+      // After folders load, fetch filter options scoped to current folder
+      const fp = buildFolderParam(currentFolderId, foldersRef.current);
+      fetchFilterOptions(fp);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Also extract options from current-page documents whenever they load
@@ -225,6 +253,15 @@ const DocumentList = ({ onCreate, onView }) => {
     fetchDocuments();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, pageSize, keywordsFilter, currentFolderId]);
+
+  // When folder changes: reset keyword options and re-fetch scoped to that folder
+  useEffect(() => {
+    setDynamicKeywordOptions([]);
+    setKeywordsFilter([]);
+    const fp = buildFolderParam(currentFolderId, foldersRef.current);
+    fetchFilterOptions(fp);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentFolderId]);
 
   const handleSearch = () => {
     setPage(1);
@@ -266,12 +303,16 @@ const DocumentList = ({ onCreate, onView }) => {
     setSearching(true);
     try {
       const filterValues = filterForm.getFieldsValue();
+
+      const folderSearchParam = buildFolderParam(currentFolderId, foldersRef.current);
+
       const response = await apiClient.get('documents/search-text-all', {
         params: {
           q: query,
           classification_id: filterValues.classification_id,
           file_type: filterValues.file_type,
           project_id: filterValues.project_id,
+          ...folderSearchParam,
         },
       });
       setSearchResults(response.data.matches);
@@ -546,7 +587,12 @@ const DocumentList = ({ onCreate, onView }) => {
         <Col xs={24} md={12}>
           <Space.Compact style={{ width: '100%' }}>
             <Input
-              placeholder="跨文件全文檢索..."
+              placeholder={(() => {
+                if (!currentFolderId || currentFolderId === '__all__') return '跨文件全文檢索...';
+                if (currentFolderId === '__root__') return '搜尋未歸類文件...';
+                const name = folders.find((f) => f.id === currentFolderId)?.name;
+                return name ? `搜尋「${name}」資料夾內的文件（含子資料夾）...` : '搜尋當前資料夾...';
+              })()}
               value={crossDocSearch}
               onChange={(e) => setCrossDocSearch(e.target.value)}
               onPressEnter={handleCrossDocSearch}

@@ -45,6 +45,7 @@ class DocumentService:
         classification_id: Optional[str] = None,
         metadata_filters: Optional[Dict[str, Any]] = None,
         folder_id: Optional[str] = None,
+        folder_ids: Optional[List[str]] = None,
     ) -> Tuple[List[models.Document], int]:
         query = (
             self.db.query(models.Document)
@@ -60,7 +61,10 @@ class DocumentService:
         if classification_id:
             query = query.filter(models.Document.classification_id == classification_id)
 
-        if folder_id is not None:
+        # folder_ids takes precedence (recursive: selected folder + all descendants)
+        if folder_ids is not None:
+            query = query.filter(models.Document.folder_id.in_(folder_ids))
+        elif folder_id is not None:
             if folder_id == "__root__":
                 query = query.filter(models.Document.folder_id == None)  # noqa: E711
             else:

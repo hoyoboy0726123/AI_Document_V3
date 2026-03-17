@@ -161,6 +161,7 @@ def list_documents(
     project_id: Optional[str] = None,
     keywords: Optional[str] = None,
     folder_id: Optional[str] = None,
+    folder_ids: Optional[str] = None,  # comma-separated folder IDs (recursive selection)
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -174,6 +175,11 @@ def list_documents(
     if keywords:
         metadata_filters["keywords"] = [item.strip() for item in keywords.split(",") if item.strip()]
 
+    parsed_folder_ids = (
+        [fid.strip() for fid in folder_ids.split(",") if fid.strip()]
+        if folder_ids else None
+    )
+
     documents, total = doc_service.list(
         page=page,
         page_size=page_size,
@@ -181,6 +187,7 @@ def list_documents(
         classification_id=classification_id,
         metadata_filters=metadata_filters or None,
         folder_id=folder_id,
+        folder_ids=parsed_folder_ids,
     )
     return schemas.DocumentListResponse(items=documents, total=total, page=page, page_size=page_size)
 
@@ -352,6 +359,8 @@ def search_all_documents_text(
     classification_id: Optional[str] = None,
     file_type: Optional[str] = None,
     project_id: Optional[str] = None,
+    folder_id: Optional[str] = None,
+    folder_ids: Optional[str] = None,  # comma-separated, for recursive folder filter
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -389,6 +398,15 @@ def search_all_documents_text(
         doc_query = doc_query.filter(
             func.json_extract(models.Document.metadata_data, '$.project_id') == project_id
         )
+
+    # 資料夾範圍篩選（遞迴：folder_ids 優先）
+    if folder_ids:
+        ids = [fid.strip() for fid in folder_ids.split(",") if fid.strip()]
+        doc_query = doc_query.filter(models.Document.folder_id.in_(ids))
+    elif folder_id == "__root__":
+        doc_query = doc_query.filter(models.Document.folder_id == None)  # noqa: E711
+    elif folder_id:
+        doc_query = doc_query.filter(models.Document.folder_id == folder_id)
 
     # 獲取符合篩選條件的文件 IDs
     document_ids = [doc.id for doc in doc_query.all()]
