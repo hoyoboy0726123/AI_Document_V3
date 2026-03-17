@@ -3,9 +3,12 @@ import {
   AppstoreOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
+  RollbackOutlined,
+  SaveOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
 import {
+  Alert,
   Button,
   Card,
   Form,
@@ -17,6 +20,7 @@ import {
   Table,
   Tabs,
   Tag,
+  Typography,
   message,
 } from "antd";
 import AppLayout from "../components/Layout/AppLayout";
@@ -46,6 +50,61 @@ const AdminPage = () => {
   const [editingOption, setEditingOption] = useState(null);
   const [optionEditForm] = Form.useForm();
 
+  // ── RAG Prompt ──
+  const [ragPrompt, setRagPrompt] = useState(null);     // { system_prompt, user_template, is_default }
+  const [ragSaving, setRagSaving] = useState(false);
+  const [ragResetting, setRagResetting] = useState(false);
+  const [ragSystemPrompt, setRagSystemPrompt] = useState("");
+  const [ragUserTemplate, setRagUserTemplate] = useState("");
+
+  const fetchRagPrompt = async () => {
+    try {
+      const resp = await apiClient.get("admin/rag-prompt");
+      setRagPrompt(resp.data);
+      setRagSystemPrompt(resp.data.system_prompt);
+      setRagUserTemplate(resp.data.user_template);
+    } catch {
+      message.error("載入 RAG 提示詞失敗");
+    }
+  };
+
+  const handleRagSave = async () => {
+    setRagSaving(true);
+    try {
+      const resp = await apiClient.put("admin/rag-prompt", {
+        system_prompt: ragSystemPrompt,
+        user_template: ragUserTemplate,
+      });
+      setRagPrompt(resp.data);
+      message.success("RAG 提示詞已儲存");
+    } catch (err) {
+      message.error(err.response?.data?.detail ?? "儲存失敗");
+    } finally {
+      setRagSaving(false);
+    }
+  };
+
+  const handleRagReset = async () => {
+    Modal.confirm({
+      title: "確認載入預設提示詞？",
+      content: "將捨棄目前的自訂提示詞，恢復為系統預設值。RAG 查詢行為將與原始版本完全相同。",
+      okText: "確認重置",
+      cancelText: "取消",
+      onOk: async () => {
+        setRagResetting(true);
+        try {
+          await apiClient.delete("admin/rag-prompt");
+          await fetchRagPrompt();
+          message.success("已恢復為預設提示詞");
+        } catch {
+          message.error("重置失敗");
+        } finally {
+          setRagResetting(false);
+        }
+      },
+    });
+  };
+
   const fetchFields = async () => {
     try {
       setLoading(true);
@@ -60,6 +119,7 @@ const AdminPage = () => {
 
   useEffect(() => {
     fetchFields();
+    fetchRagPrompt();
   }, []);
 
   useEffect(() => {
@@ -343,6 +403,89 @@ const AdminPage = () => {
       key: 'system',
       label: '系統設置',
       children: <SystemSettings />,
+    },
+    {
+      key: 'rag-prompt',
+      label: 'RAG 提示詞',
+      children: (
+        <Card>
+          <Space direction="vertical" style={{ width: "100%" }} size="large">
+            {ragPrompt?.is_default === false && (
+              <Alert
+                type="info"
+                showIcon
+                message="目前使用自訂提示詞"
+                description="RAG 查詢將使用下方已儲存的自訂提示詞。點擊「載入預設」可完整恢復原始行為。"
+              />
+            )}
+            {ragPrompt?.is_default === true && (
+              <Alert
+                type="success"
+                showIcon
+                message="目前使用系統預設提示詞"
+                description="尚未設定自訂提示詞，RAG 查詢行為與原始版本完全一致。"
+              />
+            )}
+
+            <div>
+              <Typography.Text strong style={{ display: "block", marginBottom: 6 }}>
+                系統提示詞（System Prompt）
+              </Typography.Text>
+              <Typography.Text type="secondary" style={{ display: "block", marginBottom: 8, fontSize: 12 }}>
+                定義 LLM 的角色與語言要求（如：繁體中文、禁止簡體等）
+              </Typography.Text>
+              <Input.TextArea
+                rows={3}
+                value={ragSystemPrompt}
+                onChange={(e) => setRagSystemPrompt(e.target.value)}
+              />
+            </div>
+
+            <div>
+              <Typography.Text strong style={{ display: "block", marginBottom: 6 }}>
+                查詢提示詞模板（User Prompt Template）
+              </Typography.Text>
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 8 }}
+                message="模板中必須包含以下佔位符（否則無法儲存）"
+                description={
+                  <span>
+                    <code>{"{{question}}"}</code> — 使用者問題
+                    <code>{"{{context}}"}</code> — 向量段落內容
+                    <code>{"{{history}}"}</code> — 對話歷史（可留空）
+                  </span>
+                }
+              />
+              <Input.TextArea
+                rows={18}
+                value={ragUserTemplate}
+                onChange={(e) => setRagUserTemplate(e.target.value)}
+                style={{ fontFamily: "monospace", fontSize: 13 }}
+              />
+            </div>
+
+            <Space>
+              <Button
+                type="primary"
+                icon={<SaveOutlined />}
+                loading={ragSaving}
+                onClick={handleRagSave}
+              >
+                儲存提示詞
+              </Button>
+              <Button
+                icon={<RollbackOutlined />}
+                loading={ragResetting}
+                onClick={handleRagReset}
+              >
+                載入預設
+              </Button>
+            </Space>
+          </Space>
+        </Card>
+      ),
     },
   ];
 

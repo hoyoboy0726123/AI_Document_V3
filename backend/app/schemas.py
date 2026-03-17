@@ -288,6 +288,17 @@ class ConversationMessage(BaseModel):
     sources: List[DocumentChunkSource] = Field(default_factory=list)
 
 
+class RAGPromptRead(BaseModel):
+    system_prompt: str
+    user_template: str
+    is_default: bool
+
+
+class RAGPromptUpdate(BaseModel):
+    system_prompt: Optional[str] = None
+    user_template: Optional[str] = None
+
+
 class RAGQueryRequest(BaseModel):
     question: str
     top_k: int = Field(default=5, ge=1, le=10)

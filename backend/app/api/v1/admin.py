@@ -559,3 +559,47 @@ def update_vector_config(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"更新向量配置失敗：{str(exc)}"
         )
+
+
+# ========== RAG Prompt Management ==========
+
+@router.get("/rag-prompt", response_model=schemas.RAGPromptRead)
+@router.get("/rag-prompt/", response_model=schemas.RAGPromptRead)
+def get_rag_prompt(
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_admin_user),
+):
+    """取得目前生效的 RAG 提示詞（自訂或預設）。"""
+    _ = current_admin
+    return SystemConfigService(db).get_rag_prompts()
+
+
+@router.put("/rag-prompt", response_model=schemas.RAGPromptRead)
+@router.put("/rag-prompt/", response_model=schemas.RAGPromptRead)
+def update_rag_prompt(
+    payload: schemas.RAGPromptUpdate,
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_admin_user),
+):
+    """儲存自訂 RAG 提示詞。模板需包含 {{question}} 與 {{context}} 佔位符。"""
+    _ = current_admin
+    svc = SystemConfigService(db)
+    try:
+        svc.update_rag_prompts(
+            system_prompt=payload.system_prompt,
+            user_template=payload.user_template,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return svc.get_rag_prompts()
+
+
+@router.delete("/rag-prompt", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/rag-prompt/", status_code=status.HTTP_204_NO_CONTENT)
+def reset_rag_prompt(
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_admin_user),
+):
+    """重置 RAG 提示詞為程式碼預設值（等同從未修改過）。"""
+    _ = current_admin
+    SystemConfigService(db).reset_rag_prompts()

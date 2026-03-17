@@ -160,7 +160,12 @@ def query_rag(
         [{"question": m.question, "answer": m.answer} for m in payload.conversation_history]
         if payload.conversation_history else None
     )
-    answer = ai.generate_rag_answer(final_question, contexts, conversation_history=history)
+    rag_prompts = config_service.get_rag_prompts()
+    answer = ai.generate_rag_answer(
+        final_question, contexts, conversation_history=history,
+        system_prompt=rag_prompts["system_prompt"],
+        user_template=rag_prompts["user_template"],
+    )
     return schemas.RAGQueryResponse(
         answer=answer,
         sources=sources,
@@ -286,13 +291,18 @@ def query_stream(
         if payload.conversation_history else None
     )
     sources_data = [s.model_dump() for s in sources]
+    rag_prompts = config_service.get_rag_prompts()
 
     def generate():
         try:
             if not contexts:
                 yield f"data: {json.dumps({'type': 'content', 'text': '查無足夠的相關內容，請提供更多文件或調整問題。'}, ensure_ascii=False)}\n\n"
             else:
-                for stream_chunk in ai.generate_rag_answer_stream(final_question, contexts, conversation_history=history):
+                for stream_chunk in ai.generate_rag_answer_stream(
+                    final_question, contexts, conversation_history=history,
+                    system_prompt=rag_prompts["system_prompt"],
+                    user_template=rag_prompts["user_template"],
+                ):
                     yield f"data: {json.dumps(stream_chunk, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'sources', 'sources': sources_data, 'is_followup': is_followup, 'optimized_query': optimized_query}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"

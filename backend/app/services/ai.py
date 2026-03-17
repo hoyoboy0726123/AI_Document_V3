@@ -184,27 +184,37 @@ Return a JSON object strictly following the provided schema.
     }
 
 
-def generate_rag_answer(
+_PAGE_GAP_THRESHOLD = 5  # 頁碼差超過此值視為不同章節
+
+
+def _page_label(block: Dict, idx: int) -> str:
+    page = block.get("page") or "?"
+    gap = block.get("page_gap")
+    if idx == 0 or gap is None:
+        return f"第 {page} 頁"
+    if gap <= _PAGE_GAP_THRESHOLD:
+        return f"第 {page} 頁（與主要來源相鄰，頁距 {gap}）"
+    return f"第 {page} 頁 ⚠️ 頁距 {gap}，可能為不同章節"
+
+
+def _build_rag_messages(
     question: str,
     context_blocks: List[Dict[str, str]],
-    conversation_history: Optional[List[Dict[str, str]]] = None,
-) -> str:
-    if not question:
-        raise ValueError('問題不可為空白')
+    conversation_history: Optional[List[Dict[str, str]]],
+    system_prompt: Optional[str],
+    user_template: Optional[str],
+) -> List[Dict[str, str]]:
+    """組裝傳給 LLM 的 messages，支援自訂 system_prompt 與 user_template。
 
-    if not context_blocks:
-        return '查無足夠的相關內容，請提供更多文件或調整問題。'
+    user_template 可包含三個佔位符：
+      {{question}}  → 使用者問題
+      {{context}}   → 向量段落文字
+      {{history}}   → 對話歷史區塊（空字串或「對話歷史...」整段）
+    """
+    from .system_config import DEFAULT_RAG_SYSTEM_PROMPT, DEFAULT_RAG_USER_TEMPLATE
 
-    PAGE_GAP_THRESHOLD = 5  # 頁碼差超過此值視為不同章節
-
-    def _page_label(block: Dict, idx: int) -> str:
-        page = block.get("page") or "?"
-        gap = block.get("page_gap")
-        if idx == 0 or gap is None:
-            return f"第 {page} 頁"
-        if gap <= PAGE_GAP_THRESHOLD:
-            return f"第 {page} 頁（與主要來源相鄰，頁距 {gap}）"
-        return f"第 {page} 頁 ⚠️ 頁距 {gap}，可能為不同章節"
+    sys_msg = system_prompt if system_prompt is not None else DEFAULT_RAG_SYSTEM_PROMPT
+    tmpl = user_template if user_template is not None else DEFAULT_RAG_USER_TEMPLATE
 
     context_text = "\n\n".join(
         f"[來源{block.get('source_num', idx + 1)}] {block.get('title') or '未命名段落'} ({_page_label(block, idx)})\n{(block.get('text') or '').strip()}"
@@ -218,106 +228,50 @@ def generate_rag_answer(
             f"Q: {turn.get('question', '')}\nA: {turn.get('answer', '')}"
             for turn in recent
         )
+    history_section = f"對話歷史（最近 2 輪）：\n{history_text}\n" if history_text else ""
 
-    prompt = f"""
-你是一位文件問答助理，只能根據「可用段落」作答。
-原則：
-- 僅引用與使用者問題直接相關的段落內容，其餘無關資訊請忽略。
-- 盡可能完整重現參考資料中的細節（如背景、限制、程序、數值、條件），並保持語意清楚。
-- 每個[來源]的資訊相互獨立，嚴格禁止跨來源拼湊細節（例如：不可將[來源2]的數值或條件套用到[來源1]的測試項目上）。
-- 若多個來源涉及相似但不同的測試項目或主題，必須分開描述並明確標示各自來源，不可合併成同一段落。
-- 標記「⚠️ 頁距 N，可能為不同章節」的來源極可能屬於不同測試項目：若其內容與問題主題不完全吻合，優先捨棄該來源；若仍引用，必須獨立描述並加以說明其來自不同章節，不可將其數值或條件與其他來源混用。
-- 在回答文字中以 [來源1][來源3] 標示引用來源，可於同一句結尾列出多個來源。
-- 若所有段落皆無法回答，請明確回覆「查無相關資料」，並建議提供更多上下文。
-{f'- 參考對話歷史理解追問脈絡，但答案必須來自可用段落。' if history_text else ''}
+    prompt = (
+        tmpl
+        .replace("{{question}}", question)
+        .replace("{{context}}", context_text)
+        .replace("{{history}}", history_section)
+    )
 
-{f'對話歷史（最近 2 輪）：{chr(10)}{history_text}{chr(10)}' if history_text else ''}
-使用者問題：
-{question}
-
-可用段落：
-{context_text}
-
-請以下列格式輸出：
-回答：
-<可多段或條列，需保持細節並標註來源>
-參考來源：
-- [來源X] <此來源提供的重點>
-""".strip()
-
-    return _chat_with_ollama([
-        {"role": "system", "content": "請務必使用「繁體中文（台灣）」回答，嚴格禁止簡體中文。避免輸出任何控制標記或思考過程。"},
+    return [
+        {"role": "system", "content": sys_msg},
         {"role": "user", "content": prompt},
-    ], think=True)
+    ]
+
+
+def generate_rag_answer(
+    question: str,
+    context_blocks: List[Dict[str, str]],
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+    system_prompt: Optional[str] = None,
+    user_template: Optional[str] = None,
+) -> str:
+    if not question:
+        raise ValueError('問題不可為空白')
+    if not context_blocks:
+        return '查無足夠的相關內容，請提供更多文件或調整問題。'
+
+    messages = _build_rag_messages(question, context_blocks, conversation_history, system_prompt, user_template)
+    return _chat_with_ollama(messages, think=True)
 
 
 def generate_rag_answer_stream(
     question: str,
     context_blocks: List[Dict[str, str]],
     conversation_history: Optional[List[Dict[str, str]]] = None,
+    system_prompt: Optional[str] = None,
+    user_template: Optional[str] = None,
 ):
-    """與 generate_rag_answer 使用相同 prompt，但以串流方式 yield chunks。
-    每個 chunk 為 dict: {"type": "thinking"|"content", "text": "..."}
-    """
+    """以串流方式 yield chunks: {"type": "thinking"|"content", "text": "..."}"""
     if not context_blocks:
         yield {"type": "content", "text": "查無足夠的相關內容，請提供更多文件或調整問題。"}
         return
 
-    PAGE_GAP_THRESHOLD = 5
-
-    def _page_label(block: Dict, idx: int) -> str:
-        page = block.get("page") or "?"
-        gap = block.get("page_gap")
-        if idx == 0 or gap is None:
-            return f"第 {page} 頁"
-        if gap <= PAGE_GAP_THRESHOLD:
-            return f"第 {page} 頁（與主要來源相鄰，頁距 {gap}）"
-        return f"第 {page} 頁 ⚠️ 頁距 {gap}，可能為不同章節"
-
-    context_text = "\n\n".join(
-        f"[來源{block.get('source_num', idx + 1)}] {block.get('title') or '未命名段落'} ({_page_label(block, idx)})\n{(block.get('text') or '').strip()}"
-        for idx, block in enumerate(context_blocks)
-    )
-
-    history_text = ""
-    if conversation_history:
-        recent = conversation_history[-2:]
-        history_text = "\n".join(
-            f"Q: {turn.get('question', '')}\nA: {turn.get('answer', '')}"
-            for turn in recent
-        )
-
-    prompt = f"""
-你是一位文件問答助理，只能根據「可用段落」作答。
-原則：
-- 僅引用與使用者問題直接相關的段落內容，其餘無關資訊請忽略。
-- 盡可能完整重現參考資料中的細節（如背景、限制、程序、數值、條件），並保持語意清楚。
-- 每個[來源]的資訊相互獨立，嚴格禁止跨來源拼湊細節（例如：不可將[來源2]的數值或條件套用到[來源1]的測試項目上）。
-- 若多個來源涉及相似但不同的測試項目或主題，必須分開描述並明確標示各自來源，不可合併成同一段落。
-- 標記「⚠️ 頁距 N，可能為不同章節」的來源極可能屬於不同測試項目：若其內容與問題主題不完全吻合，優先捨棄該來源；若仍引用，必須獨立描述並加以說明其來自不同章節，不可將其數值或條件與其他來源混用。
-- 在回答文字中以 [來源1][來源3] 標示引用來源，可於同一句結尾列出多個來源。
-- 若所有段落皆無法回答，請明確回覆「查無相關資料」，並建議提供更多上下文。
-{f'- 參考對話歷史理解追問脈絡，但答案必須來自可用段落。' if history_text else ''}
-
-{f'對話歷史（最近 2 輪）：{chr(10)}{history_text}{chr(10)}' if history_text else ''}
-使用者問題：
-{question}
-
-可用段落：
-{context_text}
-
-請以下列格式輸出：
-回答：
-<可多段或條列，需保持細節並標註來源>
-參考來源：
-- [來源X] <此來源提供的重點>
-""".strip()
-
-    messages = [
-        {"role": "system", "content": "請務必使用「繁體中文（台灣）」回答，嚴格禁止簡體中文。避免輸出任何控制標記或思考過程。"},
-        {"role": "user", "content": prompt},
-    ]
-
+    messages = _build_rag_messages(question, context_blocks, conversation_history, system_prompt, user_template)
     client = get_client()
     for chunk in client.chat_stream(messages, model=settings.OLLAMA_LLM_MODEL, think=True):
         yield chunk

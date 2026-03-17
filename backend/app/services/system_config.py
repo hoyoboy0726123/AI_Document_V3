@@ -7,6 +7,37 @@ from sqlalchemy.orm import Session
 from .. import models
 
 
+# ── RAG Prompt 預設值（與程式碼內 hardcode 完全一致，確保重置後行為不變）──
+
+DEFAULT_RAG_SYSTEM_PROMPT = (
+    "請務必使用「繁體中文（台灣）」回答，嚴格禁止簡體中文。避免輸出任何控制標記或思考過程。"
+)
+
+DEFAULT_RAG_USER_TEMPLATE = """\
+你是一位文件問答助理，只能根據「可用段落」作答。
+原則：
+- 僅引用與使用者問題直接相關的段落內容，其餘無關資訊請忽略。
+- 盡可能完整重現參考資料中的細節（如背景、限制、程序、數值、條件），並保持語意清楚。
+- 每個[來源]的資訊相互獨立，嚴格禁止跨來源拼湊細節（例如：不可將[來源2]的數值或條件套用到[來源1]的測試項目上）。
+- 若多個來源涉及相似但不同的測試項目或主題，必須分開描述並明確標示各自來源，不可合併成同一段落。
+- 標記「⚠️ 頁距 N，可能為不同章節」的來源極可能屬於不同測試項目：若其內容與問題主題不完全吻合，優先捨棄該來源；若仍引用，必須獨立描述並加以說明其來自不同章節，不可將其數值或條件與其他來源混用。
+- 在回答文字中以 [來源1][來源3] 標示引用來源，可於同一句結尾列出多個來源。
+- 若所有段落皆無法回答，請明確回覆「查無相關資料」，並建議提供更多上下文。
+- 參考對話歷史理解追問脈絡，但答案必須來自可用段落。
+{{history}}
+使用者問題：
+{{question}}
+
+可用段落：
+{{context}}
+
+請以下列格式輸出：
+回答：
+<可多段或條列，需保持細節並標註來源>
+參考來源：
+- [來源X] <此來源提供的重點>\
+"""
+
 # 預設配置值
 DEFAULT_VECTOR_CONFIG = {
     "overlap_chars": 250,  # 向量塊重疊字符數（0 表示取消）
@@ -96,6 +127,40 @@ class SystemConfigService:
                 raise ValueError("search_multiplier 必須是正整數")
 
         self.set_config("vector_config", config, "向量處理相關配置")
+
+    # ── RAG Prompt ──
+
+    def get_rag_prompts(self) -> Dict[str, Any]:
+        """回傳目前生效的 RAG prompts，並標記是否使用預設值。"""
+        system_prompt = self.get_config("rag_system_prompt")
+        user_template = self.get_config("rag_user_template")
+        is_default = system_prompt is None and user_template is None
+        return {
+            "system_prompt": system_prompt if system_prompt is not None else DEFAULT_RAG_SYSTEM_PROMPT,
+            "user_template": user_template if user_template is not None else DEFAULT_RAG_USER_TEMPLATE,
+            "is_default": is_default,
+        }
+
+    def update_rag_prompts(
+        self,
+        system_prompt: Optional[str] = None,
+        user_template: Optional[str] = None,
+    ) -> None:
+        """儲存自訂 RAG prompts（僅更新有傳入的欄位）。"""
+        if system_prompt is not None:
+            self.set_config("rag_system_prompt", system_prompt, "RAG 系統提示詞")
+        if user_template is not None:
+            if "{{question}}" not in user_template or "{{context}}" not in user_template:
+                raise ValueError("提示詞模板必須包含 {{question}} 與 {{context}} 佔位符")
+            self.set_config("rag_user_template", user_template, "RAG 查詢提示詞模板")
+
+    def reset_rag_prompts(self) -> None:
+        """刪除自訂值，恢復為程式碼預設 prompt（不修改任何邏輯）。"""
+        for key in ("rag_system_prompt", "rag_user_template"):
+            row = self.db.query(models.SystemConfig).filter(models.SystemConfig.key == key).first()
+            if row:
+                self.db.delete(row)
+        self.db.commit()
 
     def get_all_configs(self) -> Dict[str, Any]:
         """獲取所有配置"""
