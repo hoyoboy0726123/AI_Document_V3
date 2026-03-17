@@ -25,7 +25,6 @@ import {
 } from "antd";
 import AppLayout from "../components/Layout/AppLayout";
 import ClassificationManagement from "../components/Admin/ClassificationManagement";
-import ProjectManagement from "../components/Admin/ProjectManagement";
 import SystemSettings from "../components/Admin/SystemSettings";
 import apiClient from "../services/api";
 
@@ -393,11 +392,6 @@ const AdminPage = () => {
       key: 'classifications',
       label: '分類管理',
       children: <ClassificationManagement />,
-    },
-    {
-      key: 'projects',
-      label: '專案管理',
-      children: <ProjectManagement />,
     },
     {
       key: 'system',

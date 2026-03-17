@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from "react";
-import { Button, Card, Descriptions, Space, Tag, message, Modal, Input, Tabs, Table, Typography, Statistic, Row, Col, Tooltip, Badge, Popconfirm, Slider } from "antd";
+import React, { useEffect, useMemo, useState } from "react";
+import { Button, Card, Descriptions, Select, Space, Tag, message, Modal, Input, Tabs, Table, Typography, Statistic, Row, Col, Tooltip, Badge, Popconfirm, Slider } from "antd";
 import { FilePdfOutlined, ExclamationCircleOutlined, EditOutlined, DeleteOutlined, BookOutlined, PlusOutlined, DatabaseOutlined, ReloadOutlined, MergeCellsOutlined, ScissorOutlined, TagOutlined } from "@ant-design/icons";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
@@ -42,6 +42,7 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
   const [prefixText, setPrefixText] = useState("");
   const [prefixTargetChunk, setPrefixTargetChunk] = useState(null); // null = 批次模式
   const [prefixSaving, setPrefixSaving] = useState(false);
+  const [selectedTags, setSelectedTags] = useState([]);
 
   const fetchDocument = async () => {
     if (!documentId) return;
@@ -270,6 +271,33 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
     }
   };
 
+  // 標籤建議：從文件關鍵字、分類名稱、現有塊前綴第一行中收集
+  const tagSuggestions = useMemo(() => {
+    const set = new Set();
+    (document?.keywords ?? []).forEach((k) => k && set.add(k));
+    if (document?.classification?.name) set.add(document.classification.name);
+    (chunks?.items ?? []).forEach((chunk) => {
+      const firstLine = (chunk.text || "").split("\n")[0].trim();
+      // 將看起來像前綴的第一行（短且含冒號或句號）拆回標籤
+      if (firstLine.length > 0 && firstLine.length < 80) {
+        const cleaned = firstLine.replace(/^以下內容涉及[：:]\s*/i, "").replace(/。$/, "");
+        cleaned.split(/[；;、,，]/).forEach((t) => {
+          const tag = t.trim();
+          if (tag) set.add(tag);
+        });
+      }
+    });
+    return [...set].map((v) => ({ label: v, value: v }));
+  }, [document, chunks]);
+
+  // 選標籤後自動組成自然語言前綴（可手動繼續修改）
+  const handleTagsChange = (tags) => {
+    setSelectedTags(tags);
+    if (tags.length === 0) { setPrefixText(""); return; }
+    const joined = tags.join("；");
+    setPrefixText(`以下內容涉及：${joined}。`);
+  };
+
   const handleApplyPrefix = async () => {
     if (!prefixText.trim()) { message.warning("請輸入前綴文字"); return; }
     const targets = prefixTargetChunk
@@ -290,6 +318,7 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
       setPrefixText("");
       setPrefixTargetChunk(null);
       setSelectedChunkIds([]);
+      setSelectedTags([]);
       fetchChunks();
     } catch (error) {
       message.error(error.response?.data?.detail ?? "加入前綴失敗");
@@ -743,57 +772,96 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
         </Modal>
 
         {/* 加入前綴 Modal */}
-        <Modal
-          title={prefixTargetChunk ? `加入前綴 — 向量塊 #${prefixTargetChunk.chunk_index}` : `批次加入前綴（${selectedChunkIds.length} 塊）`}
-          open={prefixModalVisible}
-          onOk={handleApplyPrefix}
-          onCancel={() => { setPrefixModalVisible(false); setPrefixText(""); setPrefixTargetChunk(null); }}
-          confirmLoading={prefixSaving}
-          okText="套用並重新向量化"
-          cancelText="取消"
-          width={700}
-        >
-          <div style={{ marginBottom: 12 }}>
-            <Typography.Text strong>前綴文字：</Typography.Text>
-            <Input.TextArea
-              rows={3}
-              value={prefixText}
-              onChange={(e) => setPrefixText(e.target.value)}
-              placeholder="輸入要加在向量塊開頭的文字，例如：測試項目名稱：XXX"
-              style={{ marginTop: 4, fontFamily: "monospace", fontSize: 13 }}
-              autoFocus
-            />
-          </div>
-          {prefixText.trim() && (
-            <div>
-              <Typography.Text type="secondary" style={{ display: "block", marginBottom: 4 }}>
-                套用後預覽（{prefixTargetChunk ? "此塊" : "以第一塊為例"}）：
-              </Typography.Text>
-              <div style={{
-                background: "#f6ffed", border: "1px solid #b7eb8f", borderRadius: 4,
-                padding: "8px 12px", fontFamily: "monospace", fontSize: 12,
-                whiteSpace: "pre-wrap", wordBreak: "break-word",
-                maxHeight: 200, overflowY: "auto",
-              }}>
-                <span style={{ color: "#389e0d", fontWeight: 600 }}>{prefixText.trim()}</span>
-                {"\n"}
-                <span style={{ color: "#595959" }}>
-                  {(() => {
-                    const sample = prefixTargetChunk
-                      ? prefixTargetChunk.text
-                      : (chunks?.items ?? []).find((c) => selectedChunkIds.includes(c.id))?.text ?? "";
-                    return sample.length > 300 ? sample.slice(0, 300) + "…" : sample;
-                  })()}
-                </span>
-              </div>
-              {!prefixTargetChunk && selectedChunkIds.length > 1 && (
-                <Typography.Text type="secondary" style={{ fontSize: 12, marginTop: 4, display: "block" }}>
-                  此前綴將套用至所有 {selectedChunkIds.length} 個選取的向量塊
+        {(() => {
+          // 計算選取塊的頁碼範圍（用於 title）
+          const batchChunks = (chunks?.items ?? []).filter((c) => selectedChunkIds.includes(c.id));
+          const pages = prefixTargetChunk
+            ? [prefixTargetChunk.page].filter(Boolean)
+            : batchChunks.map((c) => c.page).filter(Boolean);
+          const pageLabel = pages.length > 0
+            ? `第 ${[...new Set(pages)].sort((a, b) => a - b).join("、")} 頁`
+            : "";
+          const modalTitle = prefixTargetChunk
+            ? `加入前綴 — 向量塊 #${prefixTargetChunk.chunk_index}${pageLabel ? `（${pageLabel}）` : ""}`
+            : `批次加入前綴（${selectedChunkIds.length} 塊${pageLabel ? `，${pageLabel}` : ""}）`;
+
+          return (
+            <Modal
+              title={modalTitle}
+              open={prefixModalVisible}
+              onOk={handleApplyPrefix}
+              onCancel={() => { setPrefixModalVisible(false); setPrefixText(""); setPrefixTargetChunk(null); setSelectedTags([]); }}
+              confirmLoading={prefixSaving}
+              okText="套用並重新向量化"
+              cancelText="取消"
+              width={700}
+            >
+              {/* 快速標籤選擇 */}
+              <div style={{ marginBottom: 12 }}>
+                <Typography.Text strong>快速標籤：</Typography.Text>
+                <Typography.Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+                  選擇或輸入標籤，自動組成推薦格式填入下方
                 </Typography.Text>
+                <Select
+                  mode="tags"
+                  style={{ width: "100%", marginTop: 4 }}
+                  placeholder="從建議清單選擇，或直接輸入新標籤後按 Enter"
+                  value={selectedTags}
+                  onChange={handleTagsChange}
+                  options={tagSuggestions}
+                  tokenSeparators={[",", "，", "、", ";"]}
+                  allowClear
+                />
+              </div>
+
+              {/* 前綴文字（可手動編輯） */}
+              <div style={{ marginBottom: 12 }}>
+                <Typography.Text strong>前綴文字：</Typography.Text>
+                <Typography.Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+                  選標籤後自動填入；也可直接手動修改
+                </Typography.Text>
+                <Input.TextArea
+                  rows={3}
+                  value={prefixText}
+                  onChange={(e) => setPrefixText(e.target.value)}
+                  placeholder="例如：以下內容涉及：溫度測試；測試規範。"
+                  style={{ marginTop: 4, fontFamily: "monospace", fontSize: 13 }}
+                />
+              </div>
+
+              {/* 套用預覽 */}
+              {prefixText.trim() && (
+                <div>
+                  <Typography.Text type="secondary" style={{ display: "block", marginBottom: 4 }}>
+                    套用後預覽（{prefixTargetChunk ? "此塊" : "以第一塊為例"}）：
+                  </Typography.Text>
+                  <div style={{
+                    background: "#f6ffed", border: "1px solid #b7eb8f", borderRadius: 4,
+                    padding: "8px 12px", fontFamily: "monospace", fontSize: 12,
+                    whiteSpace: "pre-wrap", wordBreak: "break-word",
+                    maxHeight: 200, overflowY: "auto",
+                  }}>
+                    <span style={{ color: "#389e0d", fontWeight: 600 }}>{prefixText.trim()}</span>
+                    {"\n"}
+                    <span style={{ color: "#595959" }}>
+                      {(() => {
+                        const sample = prefixTargetChunk
+                          ? prefixTargetChunk.text
+                          : (chunks?.items ?? []).find((c) => selectedChunkIds.includes(c.id))?.text ?? "";
+                        return sample.length > 300 ? sample.slice(0, 300) + "…" : sample;
+                      })()}
+                    </span>
+                  </div>
+                  {!prefixTargetChunk && selectedChunkIds.length > 1 && (
+                    <Typography.Text type="secondary" style={{ fontSize: 12, marginTop: 4, display: "block" }}>
+                      此前綴將套用至所有 {selectedChunkIds.length} 個選取的向量塊
+                    </Typography.Text>
+                  )}
+                </div>
               )}
-            </div>
-          )}
-        </Modal>
+            </Modal>
+          );
+        })()}
 
           {/* Edit Note Modal */}
           <Modal
