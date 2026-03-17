@@ -130,25 +130,7 @@ def query_rag(
         chunk_page = chunk.page or 0
         page_gap = abs(chunk_page - primary_page) if primary_page and chunk_page else None
 
-        if not _should_include(chunk, score):
-            # 仍加入 sources 讓前端顯示（標記為已過濾），但不傳入 LLM context
-            sources.append(
-                schemas.DocumentChunkSource(
-                    document_id=doc.id,
-                    title=doc.title,
-                    page=chunk.page,
-                    snippet=chunk.text,
-                    score=score,
-                )
-            )
-            continue
-
-        contexts.append({
-            "title": doc.title,
-            "page": chunk_page,
-            "page_gap": page_gap,
-            "text": chunk.text,
-        })
+        source_num = len(sources) + 1  # 1-based index matching frontend display order
         sources.append(
             schemas.DocumentChunkSource(
                 document_id=doc.id,
@@ -158,6 +140,18 @@ def query_rag(
                 score=score,
             )
         )
+
+        if not _should_include(chunk, score):
+            # 加入 sources 讓前端顯示，但不傳入 LLM context
+            continue
+
+        contexts.append({
+            "source_num": source_num,
+            "title": doc.title,
+            "page": chunk_page,
+            "page_gap": page_gap,
+            "text": chunk.text,
+        })
 
     final_question = optimized_query or question
     history = (
@@ -171,6 +165,140 @@ def query_rag(
         is_followup=is_followup,
         optimized_query=optimized_query,
         suggested_questions=[],
+    )
+
+
+@router.post("/query/stream")
+def query_stream(
+    payload: schemas.RAGQueryRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """與 /query 相同的檢索邏輯，但以 SSE 串流回傳思考過程與答案。"""
+    question = (payload.question or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="問題不可為空白")
+
+    config_service = SystemConfigService(db)
+    vector_config = config_service.get_vector_config()
+
+    is_followup = False
+    optimized_query = None
+    if payload.conversation_history and not payload.skip_ai_understanding:
+        try:
+            history_dicts = [{"question": m.question, "answer": m.answer} for m in payload.conversation_history]
+            intent = ai.analyze_followup_intent(question, history_dicts)
+            is_followup = bool(intent.get("is_followup", False))
+            optimized_query = intent.get("optimized_query") or question
+        except Exception:
+            optimized_query = question
+    else:
+        optimized_query = question
+
+    search_query = optimized_query or question
+    has_cn = bool(re.search(r"[\u4e00-\u9fff]", question))
+    has_cn_opt = bool(re.search(r"[\u4e00-\u9fff]", search_query))
+    if (has_cn and not has_cn_opt) or (not has_cn and has_cn_opt):
+        search_query = question
+
+    embeddings = ai.embed_texts([search_query])
+    if not embeddings:
+        def _embed_error():
+            yield f"data: {json.dumps({'type': 'error', 'message': '嵌入計算失敗'}, ensure_ascii=False)}\n\n"
+        return StreamingResponse(_embed_error(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    search_results = vector_store.search(
+        embeddings[0], top_k=(payload.top_k or 5) * vector_config["search_multiplier"]
+    )
+
+    if not search_results:
+        def _no_content():
+            yield f"data: {json.dumps({'type': 'content', 'text': '目前無可用文件內容'}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'sources', 'sources': [], 'is_followup': is_followup, 'optimized_query': optimized_query}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+        return StreamingResponse(_no_content(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    faiss_ids = [fid for fid, _ in search_results]
+    chunk_rows = (
+        db.query(models.DocumentChunk)
+        .join(models.Document, models.DocumentChunk.document_id == models.Document.id)
+        .filter(models.DocumentChunk.faiss_id.in_(faiss_ids))
+        .all()
+    )
+    chunk_map = {c.faiss_id: c for c in chunk_rows}
+
+    top_k = payload.top_k or 5
+    filtered: List[tuple] = []
+    for fid, score in search_results:
+        if score < vector_config["min_similarity_score"]:
+            continue
+        chunk = chunk_map.get(fid)
+        if not chunk:
+            continue
+        doc = chunk.document
+        if payload.document_id and doc.id != payload.document_id:
+            continue
+        if payload.classification_id and doc.classification_id != payload.classification_id:
+            continue
+        if payload.project_id and not _project_matches(doc.metadata_data or {}, payload.project_id):
+            continue
+        filtered.append((chunk, score))
+        if len(filtered) >= top_k:
+            break
+
+    if not filtered:
+        def _no_match():
+            yield f"data: {json.dumps({'type': 'content', 'text': '找不到符合的內容，請調整關鍵詞或過濾條件'}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'sources', 'sources': [], 'is_followup': is_followup, 'optimized_query': optimized_query}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+        return StreamingResponse(_no_match(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    PAGE_GAP_FILTER = 5
+    primary_page = filtered[0][0].page or 0
+    primary_doc_id = filtered[0][0].document_id
+
+    contexts: List[Dict[str, str]] = []
+    sources: List[schemas.DocumentChunkSource] = []
+    for chunk, score in filtered:
+        doc = chunk.document
+        chunk_page = chunk.page or 0
+        page_gap = abs(chunk_page - primary_page) if primary_page and chunk_page else None
+        source_num = len(sources) + 1
+        sources.append(schemas.DocumentChunkSource(
+            document_id=doc.id, title=doc.title, page=chunk.page,
+            snippet=chunk.text, score=score,
+        ))
+        if chunk.document_id == primary_doc_id and primary_page and chunk.page:
+            if abs(chunk.page - primary_page) > PAGE_GAP_FILTER:
+                continue
+        contexts.append({"source_num": source_num, "title": doc.title, "page": chunk_page, "page_gap": page_gap, "text": chunk.text})
+
+    final_question = optimized_query or question
+    history = (
+        [{"question": m.question, "answer": m.answer} for m in payload.conversation_history]
+        if payload.conversation_history else None
+    )
+    sources_data = [s.model_dump() for s in sources]
+
+    def generate():
+        try:
+            if not contexts:
+                yield f"data: {json.dumps({'type': 'content', 'text': '查無足夠的相關內容，請提供更多文件或調整問題。'}, ensure_ascii=False)}\n\n"
+            else:
+                for stream_chunk in ai.generate_rag_answer_stream(final_question, contexts, conversation_history=history):
+                    yield f"data: {json.dumps(stream_chunk, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'sources', 'sources': sources_data, 'is_followup': is_followup, 'optimized_query': optimized_query}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 

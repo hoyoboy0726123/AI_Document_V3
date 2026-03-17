@@ -631,6 +631,7 @@ class OllamaClient:
         *,
         model: Optional[str] = None,
         options: Optional[Dict[str, Any]] = None,
+        think: bool = False,
     ):
         """Stream tokens from /api/chat.
 
@@ -642,6 +643,8 @@ class OllamaClient:
             "stream": True,
             "keep_alive": self.keep_alive,
         }
+        if think:
+            payload["think"] = True
         default_opts = self._default_options()
         if options:
             merged = {**default_opts, **options}

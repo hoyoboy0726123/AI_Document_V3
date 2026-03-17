@@ -3,9 +3,11 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   Button,
   Card,
+  Col,
   Form,
   Input,
   Popconfirm,
+  Row,
   Select,
   Space,
   Table,
@@ -85,6 +87,11 @@ const DocumentList = ({ onCreate, onView }) => {
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [filterForm] = Form.useForm();
   const [metadataFields, setMetadataFields] = useState([]);
+  const [classifications, setClassifications] = useState([]);
+  const [dynamicKeywordOptions, setDynamicKeywordOptions] = useState([]);
+  const [dynamicFileTypeOptions, setDynamicFileTypeOptions] = useState([]);
+  const [dynamicProjectOptions, setDynamicProjectOptions] = useState([]);
+  const [keywordsFilter, setKeywordsFilter] = useState([]);
   const [crossDocSearch, setCrossDocSearch] = useState('');
   const [searching, setSearching] = useState(false);
   const [searchResults, setSearchResults] = useState([]);
@@ -105,19 +112,13 @@ const DocumentList = ({ onCreate, onView }) => {
         params: {
           page,
           page_size: pageSize,
-          search_term: filterValues.search_term,
-          file_type: filterValues.file_type,
-          project_id: filterValues.project_id,
-          keywords: filterValues.keywords?.join(',') ?? undefined,
+          search_term: filterValues.search_term || undefined,
+          classification_id: filterValues.classification_id || undefined,
+          project_id: filterValues.project_id || undefined,
+          keywords: keywordsFilter.length > 0 ? keywordsFilter.join(',') : undefined,
           ...params,
         },
       });
-      console.log('API 回應資料:', resp.data.items);
-      if (resp.data.items.length > 0) {
-        console.log('第一筆文件資料:', resp.data.items[0]);
-        console.log('metadata:', resp.data.items[0].metadata);
-        console.log('classification:', resp.data.items[0].classification);
-      }
       setDocuments(resp.data.items);
       setTotal(resp.data.total);
     } catch (error) {
@@ -130,28 +131,80 @@ const DocumentList = ({ onCreate, onView }) => {
   const fetchMetadataFields = async () => {
     try {
       const resp = await apiClient.get('metadata-fields');
-      console.log('載入的 metadata fields:', resp.data);
       setMetadataFields(resp.data);
-
-      // Debug: 檢查各個欄位的選項
-      resp.data.forEach(field => {
-        if (['file_type', 'project_id', 'keywords'].includes(field.name)) {
-          console.log(`${field.name} options:`, field.options?.length || 0);
-        }
-      });
     } catch (error) {
       console.error('無法載入元數據欄位', error);
     }
   };
 
+  // Extract metadata options from a list of documents and merge into state
+  const extractAndMergeOptions = (docs) => {
+    const kwSet = new Set();
+    const ftSet = new Set();
+    const projSet = new Set();
+    docs.forEach((doc) => {
+      // API serializes metadata_data → "metadata"; handle both just in case
+      const meta = doc.metadata ?? doc.metadata_data ?? {};
+      const kws = meta.keywords;
+      if (Array.isArray(kws)) kws.forEach((kw) => kw && kwSet.add(String(kw)));
+      else if (typeof kws === 'string' && kws) kwSet.add(kws);
+      if (meta.file_type) ftSet.add(String(meta.file_type));
+      if (meta.project_id) projSet.add(String(meta.project_id));
+    });
+    if (kwSet.size > 0)
+      setDynamicKeywordOptions((prev) => {
+        const existing = new Set(prev.map((o) => o.value));
+        const merged = [...prev, ...[...kwSet].filter((v) => !existing.has(v)).map((v) => ({ label: v, value: v }))];
+        return merged.sort((a, b) => a.label.localeCompare(b.label, 'zh-TW'));
+      });
+    if (ftSet.size > 0)
+      setDynamicFileTypeOptions((prev) => {
+        const existing = new Set(prev.map((o) => o.value));
+        const merged = [...prev, ...[...ftSet].filter((v) => !existing.has(v)).map((v) => ({ label: v, value: v }))];
+        return merged.sort((a, b) => a.label.localeCompare(b.label, 'zh-TW'));
+      });
+    if (projSet.size > 0)
+      setDynamicProjectOptions((prev) => {
+        const existing = new Set(prev.map((o) => o.value));
+        const merged = [...prev, ...[...projSet].filter((v) => !existing.has(v)).map((v) => ({ label: v, value: v }))];
+        return merged.sort((a, b) => a.label.localeCompare(b.label, 'zh-TW'));
+      });
+  };
+
+  // Fetch all docs (large page) to populate filter options comprehensively
+  const fetchFilterOptions = async () => {
+    try {
+      const resp = await apiClient.get('documents/', { params: { page: 1, page_size: 500 } });
+      const docs = resp.data?.items ?? [];
+      extractAndMergeOptions(docs);
+    } catch (error) {
+      console.error('無法載入篩選選項', error);
+    }
+  };
+
+  const fetchClassifications = async () => {
+    try {
+      const resp = await apiClient.get('documents/classifications');
+      setClassifications(resp.data ?? []);
+    } catch {}
+  };
+
   useEffect(() => {
     fetchMetadataFields();
+    fetchFilterOptions();
+    fetchClassifications();
   }, []);
+
+  // Also extract options from current-page documents whenever they load
+  useEffect(() => {
+    if (documents.length > 0) extractAndMergeOptions(documents);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documents]);
 
   useEffect(() => {
     fetchDocuments();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize]);
+  }, [page, pageSize, keywordsFilter]);
 
   const handleSearch = () => {
     setPage(1);
@@ -160,10 +213,12 @@ const DocumentList = ({ onCreate, onView }) => {
 
   const handleReset = () => {
     filterForm.resetFields();
+    setKeywordsFilter([]);
     setPage(1);
     fetchDocuments({
       page: 1,
       search_term: undefined,
+      classification_id: undefined,
       file_type: undefined,
       project_id: undefined,
       keywords: undefined,
@@ -175,6 +230,7 @@ const DocumentList = ({ onCreate, onView }) => {
       await apiClient.delete(`documents/${documentId}`);
       message.success('文件已刪除');
       fetchDocuments();
+      fetchFilterOptions();
     } catch (error) {
       message.error(error.response?.data?.detail ?? '刪除文件失敗');
     }
@@ -238,20 +294,19 @@ const DocumentList = ({ onCreate, onView }) => {
     // 保留搜索結果，用戶可以繼續查看下一個結果
   };
 
-  const keywordOptions = useMemo(() => {
-    const keywordsField = metadataFields.find((field) => field.name === 'keywords');
-    return (
-      keywordsField?.options?.map((opt) => ({
-        label: opt.display_value,
-        value: opt.value,
-      })) ?? []
-    );
-  }, [metadataFields]);
+  // Keywords: always use dynamic options (free-form tags, not predefined)
+  const keywordOptions = dynamicKeywordOptions;
 
-  const selectOptions = (fieldName) =>
-    metadataFields
+  // For file_type / project_id: prefer admin-configured options, fall back to dynamic
+  const selectOptions = (fieldName) => {
+    const adminOpts = metadataFields
       .find((item) => item.name === fieldName)
       ?.options?.map((opt) => ({ label: opt.display_value, value: opt.value })) ?? [];
+    if (adminOpts.length > 0) return adminOpts;
+    if (fieldName === 'file_type') return dynamicFileTypeOptions;
+    if (fieldName === 'project_id') return dynamicProjectOptions;
+    return [];
+  };
 
   // 根據欄位名稱和值，查找對應的顯示名稱
   const getDisplayValue = (fieldName, value) => {
@@ -312,18 +367,10 @@ const DocumentList = ({ onCreate, onView }) => {
       ),
     },
     {
-      title: '文件類型',
-      dataIndex: ['metadata', 'file_type'],
-      render: (value) => {
-        const displayValue = getDisplayValue('file_type', value);
-        return displayValue ? <Tag color="blue">{displayValue}</Tag> : '-';
-      },
-    },
-    {
       title: '所屬專案',
       dataIndex: ['metadata', 'project_id'],
       render: (value) => {
-        const displayValue = getDisplayValue('project_id', value);
+        const displayValue = getDisplayValue('project_id', value) || value;
         return displayValue ? <Tag color="purple">{displayValue}</Tag> : '-';
       },
     },
@@ -390,25 +437,43 @@ const DocumentList = ({ onCreate, onView }) => {
         </Space>
       }
     >
-      {/* 跨文件全文檢索 */}
-      <div style={{ marginBottom: 16 }}>
-        <Space.Compact style={{ width: '100%', maxWidth: 600 }}>
-          <Input
-            placeholder="跨文件全文檢索..."
-            value={crossDocSearch}
-            onChange={(e) => setCrossDocSearch(e.target.value)}
-            onPressEnter={handleCrossDocSearch}
-            prefix={<SearchOutlined />}
+      {/* 第一行：跨文件全文檢索 + 關鍵字標籤篩選 */}
+      <Row gutter={16} style={{ marginBottom: 12 }}>
+        <Col xs={24} md={12}>
+          <Space.Compact style={{ width: '100%' }}>
+            <Input
+              placeholder="跨文件全文檢索..."
+              value={crossDocSearch}
+              onChange={(e) => setCrossDocSearch(e.target.value)}
+              onPressEnter={handleCrossDocSearch}
+              prefix={<SearchOutlined />}
+              allowClear
+            />
+            <Button type="primary" loading={searching} onClick={handleCrossDocSearch}>
+              搜尋
+            </Button>
+            {showSearchResults && (
+              <Button onClick={handleClearSearch}>清除結果</Button>
+            )}
+          </Space.Compact>
+        </Col>
+        <Col xs={24} md={12}>
+          <Select
+            mode="multiple"
             allowClear
+            placeholder="關鍵字標籤篩選"
+            style={{ width: '100%' }}
+            options={keywordOptions}
+            showSearch
+            optionFilterProp="label"
+            value={keywordsFilter}
+            onChange={(val) => {
+              setKeywordsFilter(val);
+              setPage(1);
+            }}
           />
-          <Button type="primary" loading={searching} onClick={handleCrossDocSearch}>
-            搜尋
-          </Button>
-          {showSearchResults && (
-            <Button onClick={handleClearSearch}>清除結果</Button>
-          )}
-        </Space.Compact>
-      </div>
+        </Col>
+      </Row>
 
       {/* 搜尋結果顯示 */}
       {showSearchResults && searchResults.length > 0 && (
@@ -453,40 +518,27 @@ const DocumentList = ({ onCreate, onView }) => {
 
       <Divider style={{ margin: '16px 0' }} />
 
-      <Form form={filterForm} layout="inline" onFinish={handleSearch} style={{ marginBottom: 16 }}>
-        <Form.Item name="search_term" label="關鍵字">
-          <Input placeholder="輸入標題關鍵字" allowClear />
+      <Form form={filterForm} layout="inline" onFinish={handleSearch} style={{ marginBottom: 16, flexWrap: 'wrap', gap: '8px 0' }}>
+        <Form.Item name="search_term" label="標題" style={{ marginBottom: 0 }}>
+          <Input placeholder="輸入標題關鍵字" allowClear style={{ width: 160 }} />
         </Form.Item>
-        <Form.Item name="file_type" label="文件類型">
+        <Form.Item name="classification_id" label="分類" style={{ marginBottom: 0 }}>
           <Select
-            placeholder="選擇文件類型"
-            options={selectOptions('file_type')}
+            placeholder="選擇分類"
             allowClear
             style={{ width: 180 }}
+            options={classifications.map((c) => ({
+              label: c.code ? `${c.name} (${c.code})` : c.name,
+              value: c.id,
+            }))}
           />
         </Form.Item>
-        <Form.Item name="project_id" label="所屬專案">
-          <Select
-            placeholder="選擇專案"
-            options={selectOptions('project_id')}
-            allowClear
-            style={{ width: 180 }}
-          />
+        <Form.Item name="project_id" label="專案" style={{ marginBottom: 0 }}>
+          <Select placeholder="選擇專案" options={selectOptions('project_id')} allowClear style={{ width: 160 }} />
         </Form.Item>
-        <Form.Item name="keywords" label="關鍵字標籤">
-          <Select
-            mode="multiple"
-            allowClear
-            placeholder="選擇關鍵字"
-            style={{ minWidth: 240 }}
-            options={keywordOptions}
-          />
-        </Form.Item>
-        <Form.Item>
+        <Form.Item style={{ marginBottom: 0 }}>
           <Space>
-            <Button type="primary" htmlType="submit">
-              搜尋
-            </Button>
+            <Button type="primary" htmlType="submit">搜尋</Button>
             <Button onClick={handleReset}>重設</Button>
           </Space>
         </Form.Item>

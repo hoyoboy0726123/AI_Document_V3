@@ -14,6 +14,7 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
   const [form] = Form.useForm();
   const [metadataFields, setMetadataFields] = useState([]);
   const [classificationOptions, setClassificationOptions] = useState([]);
+  const [projectOptions, setProjectOptions] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [processingStatus, setProcessingStatus] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -43,6 +44,14 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
     try {
       const resp = await apiClient.get("metadata-fields");
       setMetadataFields(resp.data);
+      const projectField = resp.data.find((f) => f.name === "project_id");
+      if (projectField && projectField.options) {
+        setProjectOptions(
+          projectField.options
+            .filter((opt) => opt.is_active !== false)
+            .map((opt) => ({ label: opt.display_value, value: opt.value }))
+        );
+      }
     } catch (error) {
       message.error(error.response?.data?.detail ?? "載入中繼資料欄位失敗");
     }
@@ -313,7 +322,6 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
     );
     const metadataPatch = { ...currentMetadata, keywords: mergedKeywords };
     if (suggestedMetadata.file_type) metadataPatch.file_type = suggestedMetadata.file_type;
-    if (suggestedMetadata.project_id) metadataPatch.project_id = suggestedMetadata.project_id;
 
     form.setFieldsValue({
       title: form.getFieldValue("title") || (result.filename?.replace(/\.pdf$/i, "") ?? ""),
@@ -434,9 +442,6 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
       ? null
       : findClassificationId(suggestion.classification);
 
-    // 專案只從 metadata 中取得（AI 只會從現有選項中匹配，不會建議新增）
-    const projectValue = suggestedMetadata?.project_id;
-
     const payload = {};
     // 只處理分類的新增建議
     if (suggestion.classification_is_new && suggestion.classification) {
@@ -473,9 +478,6 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
     const updates = { metadata: nextMetadata };
     if (classificationId) {
       updates.classification_id = classificationId;
-    }
-    if (projectValue) {
-      updates.metadata.project_id = projectValue;
     }
     if (editedSuggestion?.summary !== undefined) {
       updates.ai_summary = editedSuggestion.summary;
@@ -665,6 +667,18 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
         <Form.Item name="source_pdf_path" hidden>
           <Input type="hidden" />
         </Form.Item>
+
+        {projectOptions.length > 0 && (
+          <Form.Item name={["metadata", "project_id"]} label="所屬專案">
+            <Select
+              allowClear
+              showSearch
+              placeholder="選擇專案"
+              optionFilterProp="label"
+              options={projectOptions}
+            />
+          </Form.Item>
+        )}
 
         <Form.Item name="ai_summary" label="AI 摘要">
           <Input.TextArea rows={4} placeholder="AI 自動生成的文件摘要（可手動修改）" />

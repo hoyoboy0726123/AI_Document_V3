@@ -129,6 +129,7 @@ class DocumentUpdate(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
     classification_id: Optional[str] = None
     source_pdf_path: Optional[str] = None
+    ai_summary: Optional[str] = None
 
 
 class ClassificationSummary(BaseModel):
