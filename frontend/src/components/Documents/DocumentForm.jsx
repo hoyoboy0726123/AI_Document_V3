@@ -69,15 +69,9 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
 
   const fetchKeywordOptions = async () => {
     try {
-      const resp = await apiClient.get("documents", { params: { page: 1, page_size: 500 } });
-      const docs = resp.data?.items ?? [];
-      const kwSet = new Set();
-      docs.forEach((doc) => {
-        const meta = doc.metadata ?? doc.metadata_data ?? {};
-        const kws = meta.keywords;
-        if (Array.isArray(kws)) kws.forEach((k) => k && kwSet.add(k));
-      });
-      setKeywordOptions([...kwSet].sort().map((k) => ({ label: k, value: k })));
+      const resp = await apiClient.get("documents/keywords");
+      const kws = resp.data ?? [];
+      setKeywordOptions(kws.map((k) => ({ label: k, value: k })));
     } catch {
       // 靜默失敗，不影響表單使用
     }

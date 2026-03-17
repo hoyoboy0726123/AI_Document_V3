@@ -193,6 +193,28 @@ def list_classifications(
     return [schemas.ClassificationSummary.model_validate(cat) for cat in categories]
 
 
+@router.get("/keywords", response_model=List[str])
+def list_all_keywords(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """回傳系統中所有文件使用過的唯一關鍵字清單（排序後）。"""
+    _ = current_user
+    rows = db.query(models.Document.metadata_data).filter(
+        models.Document.is_archived == False  # noqa: E712
+    ).all()
+    kw_set: set = set()
+    for (meta,) in rows:
+        if not isinstance(meta, dict):
+            continue
+        kws = meta.get("keywords")
+        if isinstance(kws, list):
+            for k in kws:
+                if k and isinstance(k, str):
+                    kw_set.add(k)
+    return sorted(kw_set)
+
+
 @router.post("/suggestions/accept", response_model=schemas.SuggestionAcceptanceResponse)
 def accept_suggestion_recommendations(
     payload: schemas.SuggestionAcceptanceRequest,
