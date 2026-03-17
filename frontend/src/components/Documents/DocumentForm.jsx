@@ -15,6 +15,7 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
   const [metadataFields, setMetadataFields] = useState([]);
   const [classificationOptions, setClassificationOptions] = useState([]);
   const [projectOptions, setProjectOptions] = useState([]);
+  const [keywordOptions, setKeywordOptions] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [processingStatus, setProcessingStatus] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -66,9 +67,26 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
     }
   };
 
+  const fetchKeywordOptions = async () => {
+    try {
+      const resp = await apiClient.get("documents", { params: { page: 1, page_size: 500 } });
+      const docs = resp.data?.items ?? [];
+      const kwSet = new Set();
+      docs.forEach((doc) => {
+        const meta = doc.metadata ?? doc.metadata_data ?? {};
+        const kws = meta.keywords;
+        if (Array.isArray(kws)) kws.forEach((k) => k && kwSet.add(k));
+      });
+      setKeywordOptions([...kwSet].sort().map((k) => ({ label: k, value: k })));
+    } catch {
+      // 靜默失敗，不影響表單使用
+    }
+  };
+
   useEffect(() => {
     fetchMetadataFields();
     fetchClassifications();
+    fetchKeywordOptions();
   }, []);
 
   useEffect(() => {
@@ -691,11 +709,15 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
               mode="tags"
               placeholder="輸入關鍵字後按 Enter 新增"
               tokenSeparators={[","]}
+              options={keywordOptions}
+              filterOption={(input, option) =>
+                option.value.toLowerCase().includes(input.toLowerCase())
+              }
             />
           </Form.Item>
         )}
 
-        {metadataFields.map((field) => renderMetadataField(field))}
+        {metadataFields.filter((f) => f.name !== "project_id").map((field) => renderMetadataField(field))}
 
         {submitting && processingStatus && (
           <Card style={{ marginBottom: 16 }} size="small">
