@@ -638,12 +638,41 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
                         dataIndex: "text",
                         render: (text, record) => (
                           <div>
-                            <Typography.Text
-                              style={{ cursor: "pointer" }}
-                              onClick={() => setExpandedChunkId(expandedChunkId === record.id ? null : record.id)}
-                            >
-                              {expandedChunkId === record.id ? text : `${text.slice(0, 120)}${text.length > 120 ? "…" : ""}`}
-                            </Typography.Text>
+                            {expandedChunkId === record.id ? (
+                              <div>
+                                <div
+                                  style={{
+                                    whiteSpace: "pre-wrap",
+                                    wordBreak: "break-word",
+                                    fontFamily: "monospace",
+                                    fontSize: 12,
+                                    lineHeight: 1.6,
+                                    maxHeight: 320,
+                                    overflowY: "auto",
+                                    background: "#fafafa",
+                                    border: "1px solid #e8e8e8",
+                                    borderRadius: 4,
+                                    padding: "8px 10px",
+                                    marginBottom: 4,
+                                  }}
+                                >
+                                  {text}
+                                </div>
+                                <Typography.Link
+                                  style={{ fontSize: 12 }}
+                                  onClick={() => setExpandedChunkId(null)}
+                                >
+                                  收起
+                                </Typography.Link>
+                              </div>
+                            ) : (
+                              <Typography.Text
+                                style={{ cursor: "pointer" }}
+                                onClick={() => setExpandedChunkId(record.id)}
+                              >
+                                {`${text.slice(0, 120)}${text.length > 120 ? "…" : ""}`}
+                              </Typography.Text>
+                            )}
                           </div>
                         ),
                       },
