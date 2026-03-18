@@ -469,6 +469,16 @@ class DocumentNoteRead(DocumentNoteBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+class GlobalNoteRead(DocumentNoteBase):
+    """跨文件筆記（含所屬文件資訊）"""
+    id: str
+    document_id: str
+    document_title: str
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
 DocumentRead.model_rebuild()
 
 

@@ -13,6 +13,7 @@ import QAConsolePage from "./pages/QAConsolePage";
 import AdminPage from "./pages/AdminPage";
 import VectorSearchTestPage from "./pages/VectorSearchTestPage";
 import VectorHealthPage from "./pages/VectorHealthPage";
+import NotebookPage from "./pages/NotebookPage";
 import PrivateRoute from "./components/PrivateRoute";
 import { TaskStatusProvider } from "./contexts/TaskStatusContext";
 import TaskProgressBanner from "./components/TaskProgressBanner";
@@ -66,6 +67,14 @@ function App() {
               element={( 
                 <PrivateRoute>
                   <QAConsolePage />
+                </PrivateRoute>
+              )}
+            />
+            <Route
+              path="/notebook"
+              element={(
+                <PrivateRoute>
+                  <NotebookPage />
                 </PrivateRoute>
               )}
             />

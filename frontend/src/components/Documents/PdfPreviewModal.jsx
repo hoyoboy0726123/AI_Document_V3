@@ -483,11 +483,16 @@ const PdfPreviewModal = ({
     if (!documentId) return;
     try {
       setSavingNote(true);
-      // Remove HTML tags for storage if needed, but keeping HTML might be better for rich text
-      // For now, let's store as is, but maybe strip for simple display
+      const pageRef = analyzedPages.length > 0
+        ? analyzedPages.map((p) => `第 ${p} 頁`).join("、")
+        : pageNumber ? `第 ${pageNumber} 頁` : null;
+      const sourceSection =
+        `\n\n---\n**📎 來源文件**\n` +
+        `[${title || "文件"}${pageRef ? ` — ${pageRef}` : ""}](/documents/${documentId}` +
+        `${analyzedPages.length === 1 ? `?page=${analyzedPages[0]}` : pageNumber ? `?page=${pageNumber}` : ""})`;
       await apiClient.post(`/documents/${documentId}/notes`, {
         question: question,
-        answer: answer
+        answer: answer + sourceSection,
       });
       message.success("已儲存至記事");
     } catch (error) {

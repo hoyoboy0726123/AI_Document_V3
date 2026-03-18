@@ -483,6 +483,33 @@ def search_all_documents_text(
     )
 
 
+@router.get("/notes", response_model=List[schemas.GlobalNoteRead])
+@router.get("/notes/", response_model=List[schemas.GlobalNoteRead])
+def list_all_notes(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """列出當前使用者所有文件的筆記（跨文件）"""
+    notes = (
+        db.query(models.DocumentNote)
+        .join(models.Document, models.DocumentNote.document_id == models.Document.id)
+        .order_by(models.DocumentNote.created_at.desc())
+        .all()
+    )
+    return [
+        schemas.GlobalNoteRead(
+            id=n.id,
+            document_id=n.document_id,
+            document_title=n.document.title,
+            question=n.question,
+            answer=n.answer,
+            created_at=n.created_at,
+            updated_at=n.updated_at,
+        )
+        for n in notes
+    ]
+
+
 @router.get("/{document_id}", response_model=schemas.DocumentRead)
 def get_document(
     document_id: str,
