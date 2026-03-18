@@ -51,6 +51,7 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
   const [prefixTargetChunk, setPrefixTargetChunk] = useState(null); // null = 批次模式
   const [prefixSaving, setPrefixSaving] = useState(false);
   const [selectedTags, setSelectedTags] = useState([]);
+  const [viewingNote, setViewingNote] = useState(null); // 純閱讀筆記
 
   // 快速頁面預覽
   const [quickPdfPage, setQuickPdfPage] = useState(null);
@@ -496,8 +497,8 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
                     }
                     extra={
                       <Space size={0}>
-                        <Button type="text" icon={<EditOutlined style={{ color: '#5f6368' }} />} onClick={() => openEditNoteModal(note)} />
-                        <Button type="text" icon={<DeleteOutlined style={{ color: '#5f6368' }} />} onClick={() => handleDeleteNote(note.id)} />
+                        <Button type="text" icon={<EditOutlined style={{ color: '#5f6368' }} />} onClick={(e) => { e.stopPropagation(); openEditNoteModal(note); }} />
+                        <Button type="text" icon={<DeleteOutlined style={{ color: '#5f6368' }} />} onClick={(e) => { e.stopPropagation(); handleDeleteNote(note.id); }} />
                       </Space>
                     }
                     style={{
@@ -513,6 +514,7 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
                     headStyle={{ borderBottom: 'none', padding: '20px 20px 0 20px', minHeight: 48 }}
                     bodyStyle={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', padding: '12px 20px 20px 20px' }}
                     hoverable
+                    onClick={() => setViewingNote(note)}
                   >
                     <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
                       <div className="markdown-content" style={{ fontSize: 14, color: '#3c4043', lineHeight: 1.6 }}>
@@ -982,6 +984,40 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
                 </Document>
               )}
             </div>
+          </Modal>
+
+          {/* 筆記閱讀 Modal */}
+          <Modal
+            open={!!viewingNote}
+            onCancel={() => setViewingNote(null)}
+            title={
+              <Space>
+                <span>{viewingNote && getRandomEmoji(viewingNote.id)}</span>
+                <span>{viewingNote?.question}</span>
+              </Space>
+            }
+            footer={
+              <Space>
+                <Button
+                  icon={<EditOutlined />}
+                  onClick={() => { setViewingNote(null); openEditNoteModal(viewingNote); }}
+                >
+                  編輯
+                </Button>
+                <Button onClick={() => setViewingNote(null)}>關閉</Button>
+              </Space>
+            }
+            width={720}
+            style={{ top: 60 }}
+            styles={{ body: { maxHeight: "70vh", overflowY: "auto", padding: "16px 24px" } }}
+          >
+            {viewingNote && (
+              <div className="markdown-content" style={{ fontSize: 15, lineHeight: 1.8, color: '#202124' }}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>
+                  {viewingNote.answer}
+                </ReactMarkdown>
+              </div>
+            )}
           </Modal>
 
           {/* Edit Note Modal */}
