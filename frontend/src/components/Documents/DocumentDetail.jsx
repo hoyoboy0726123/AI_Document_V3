@@ -1,14 +1,22 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { Button, Card, Descriptions, Select, Space, Tag, message, Modal, Input, Tabs, Table, Typography, Statistic, Row, Col, Tooltip, Badge, Popconfirm, Slider } from "antd";
-import { FilePdfOutlined, ExclamationCircleOutlined, EditOutlined, DeleteOutlined, BookOutlined, PlusOutlined, DatabaseOutlined, ReloadOutlined, MergeCellsOutlined, ScissorOutlined, TagOutlined } from "@ant-design/icons";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Button, Card, Descriptions, Select, Space, Spin, Tag, message, Modal, Input, Tabs, Table, Typography, Statistic, Row, Col, Tooltip, Badge, Popconfirm, Slider } from "antd";
+import { FilePdfOutlined, ExclamationCircleOutlined, EditOutlined, DeleteOutlined, BookOutlined, PlusOutlined, MinusOutlined, DatabaseOutlined, ReloadOutlined, MergeCellsOutlined, ScissorOutlined, TagOutlined } from "@ant-design/icons";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import remarkGfm from "remark-gfm";
+import { Document, Page, pdfjs } from "react-pdf";
 import apiClient from "../../services/api";
+import useAuthStore from "../../stores/authStore";
 import PdfPreviewModal from "./PdfPreviewModal";
+
+pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+  "pdfjs-dist/build/pdf.worker.mjs",
+  import.meta.url,
+).toString();
 import "./DocumentDetail.css";
 
 const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBack, onEdit }) => {
+  const { token } = useAuthStore();
   const [document, setDocument] = useState(null);
   const [loading, setLoading] = useState(false);
   const [pdfPreviewVisible, setPdfPreviewVisible] = useState(false);
@@ -43,6 +51,13 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
   const [prefixTargetChunk, setPrefixTargetChunk] = useState(null); // null = 批次模式
   const [prefixSaving, setPrefixSaving] = useState(false);
   const [selectedTags, setSelectedTags] = useState([]);
+
+  // 快速頁面預覽
+  const [quickPdfPage, setQuickPdfPage] = useState(null);
+  const [quickScale, setQuickScale] = useState(1.2);
+  const [quickDragging, setQuickDragging] = useState(false);
+  const [quickDragStart, setQuickDragStart] = useState({ x: 0, y: 0, scrollLeft: 0, scrollTop: 0 });
+  const quickPdfContainerRef = useRef(null);
 
   const fetchDocument = async () => {
     if (!documentId) return;
@@ -289,6 +304,15 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
     });
     return [...set].map((v) => ({ label: v, value: v }));
   }, [document, chunks]);
+
+  const quickFileUrl = useMemo(() => {
+    if (!documentId) return null;
+    return {
+      url: `/api/v1/documents/${documentId}/pdf`,
+      httpHeaders: token ? { Authorization: `Bearer ${token}` } : {},
+      withCredentials: false,
+    };
+  }, [documentId, token]);
 
   // 選標籤後自動組成自然語言前綴（可手動繼續修改）
   const handleTagsChange = (tags) => {
@@ -591,7 +615,15 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
                         title: "頁碼",
                         dataIndex: "page",
                         width: 70,
-                        render: (v) => v ?? "-",
+                        render: (v) =>
+                          v != null && document?.pdf_path ? (
+                            <Typography.Link
+                              onClick={() => { setQuickPdfPage(v); setQuickScale(1.2); }}
+                              title={`快速預覽第 ${v} 頁`}
+                            >
+                              {v}
+                            </Typography.Link>
+                          ) : (v ?? "-"),
                       },
                       {
                         title: "字數",
@@ -862,6 +894,66 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
             </Modal>
           );
         })()}
+
+          {/* 快速頁面預覽 Modal */}
+          <Modal
+            open={quickPdfPage !== null}
+            onCancel={() => { setQuickPdfPage(null); setQuickScale(1.2); }}
+            title={`快速預覽 — 第 ${quickPdfPage} 頁`}
+            width="80%"
+            style={{ top: 20 }}
+            styles={{ body: { height: "80vh", overflow: "hidden", display: "flex", flexDirection: "column", padding: "12px 16px" } }}
+            footer={null}
+            destroyOnClose
+          >
+            <Space style={{ marginBottom: 8 }}>
+              <Button icon={<MinusOutlined />} size="small" onClick={() => setQuickScale((s) => Math.max(0.5, parseFloat((s - 0.15).toFixed(2))))} />
+              <Button icon={<PlusOutlined />} size="small" onClick={() => setQuickScale((s) => Math.min(3.0, parseFloat((s + 0.15).toFixed(2))))} />
+              <Typography.Text type="secondary">{Math.round(quickScale * 100)}%</Typography.Text>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>拖曳可平移 · 滾輪可捲動</Typography.Text>
+            </Space>
+            <div
+              ref={quickPdfContainerRef}
+              style={{
+                flex: 1,
+                overflow: "auto",
+                border: "1px solid #f0f0f0",
+                borderRadius: 6,
+                cursor: quickDragging ? "grabbing" : "grab",
+                userSelect: "none",
+              }}
+              onMouseDown={(e) => {
+                const el = quickPdfContainerRef.current;
+                if (!el) return;
+                setQuickDragging(true);
+                setQuickDragStart({ x: e.clientX, y: e.clientY, scrollLeft: el.scrollLeft, scrollTop: el.scrollTop });
+                e.preventDefault();
+              }}
+              onMouseMove={(e) => {
+                if (!quickDragging) return;
+                const el = quickPdfContainerRef.current;
+                if (!el) return;
+                el.scrollLeft = quickDragStart.scrollLeft - (e.clientX - quickDragStart.x);
+                el.scrollTop = quickDragStart.scrollTop - (e.clientY - quickDragStart.y);
+              }}
+              onMouseUp={() => setQuickDragging(false)}
+              onMouseLeave={() => setQuickDragging(false)}
+            >
+              {quickFileUrl && quickPdfPage !== null && (
+                <Document
+                  file={quickFileUrl}
+                  loading={<div style={{ padding: 40, textAlign: "center" }}><Spin tip="載入 PDF..." /></div>}
+                >
+                  <Page
+                    pageNumber={quickPdfPage}
+                    scale={quickScale}
+                    renderTextLayer={false}
+                    renderAnnotationLayer={false}
+                  />
+                </Document>
+              )}
+            </div>
+          </Modal>
 
           {/* Edit Note Modal */}
           <Modal
