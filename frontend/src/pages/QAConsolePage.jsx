@@ -9,6 +9,7 @@ import {
   Input,
   InputNumber,
   List,
+  Modal,
   Row,
   Select,
   Space,
@@ -19,7 +20,7 @@ import {
   Alert,
   message,
 } from "antd";
-import { BulbOutlined, DeleteOutlined, SendOutlined, QuestionCircleOutlined, StopOutlined } from "@ant-design/icons";
+import { BulbOutlined, DeleteOutlined, SaveOutlined, SendOutlined, QuestionCircleOutlined, StopOutlined } from "@ant-design/icons";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import AppLayout from "../components/Layout/AppLayout";
@@ -42,6 +43,9 @@ const QAConsolePage = () => {
   const [pdfPreview, setPdfPreview] = useState({ open: false, documentId: null, title: "", page: 1 });
   const [followupQuestion, setFollowupQuestion] = useState("");
   const [expandedSnippets, setExpandedSnippets] = useState({});
+  const [saveNoteModal, setSaveNoteModal] = useState({ visible: false, msg: null });
+  const [saveNoteDocId, setSaveNoteDocId] = useState(null);
+  const [saveNoteLoading, setSaveNoteLoading] = useState(false);
   const conversationEndRef = useRef(null);
   const abortRef = useRef(null);
 
@@ -291,6 +295,48 @@ const QAConsolePage = () => {
   const openPdfPreview = (source) => {
     const page = source.page && source.page > 0 ? source.page : 1;
     setPdfPreview({ open: true, documentId: source.document_id, title: source.title, page });
+  };
+
+  // 從 sources 去重取得唯一文件清單
+  const uniqueDocsFromSources = (sources) => {
+    const seen = new Set();
+    return (sources || []).filter((s) => {
+      if (seen.has(s.document_id)) return false;
+      seen.add(s.document_id);
+      return true;
+    });
+  };
+
+  const openSaveNoteModal = (msg) => {
+    const docs = uniqueDocsFromSources(msg.sources);
+    if (docs.length === 0) { message.warning("此回答無引用文件，無法儲存筆記"); return; }
+    setSaveNoteDocId(docs[0].document_id); // 預設選第一份
+    setSaveNoteModal({ visible: true, msg });
+  };
+
+  const handleSaveNote = async () => {
+    if (!saveNoteDocId) { message.warning("請選擇要儲存的文件"); return; }
+    try {
+      setSaveNoteLoading(true);
+      const sources = saveNoteModal.msg?.sources || [];
+      const sourcesSection = sources.length > 0
+        ? "\n\n---\n**📎 參考來源**\n" +
+          sources.map((s, i) =>
+            `${i + 1}. [${s.title}${s.page ? ` — 第 ${s.page} 頁` : ""}](/documents/${s.document_id}${s.page ? `?page=${s.page}` : ""})` +
+            (s.score != null ? `（相似度 ${s.score.toFixed(2)}）` : "")
+          ).join("\n")
+        : "";
+      await apiClient.post(`documents/${saveNoteDocId}/notes`, {
+        question: saveNoteModal.msg.question,
+        answer: saveNoteModal.msg.answer + sourcesSection,
+      });
+      message.success("筆記已儲存");
+      setSaveNoteModal({ visible: false, msg: null });
+    } catch {
+      message.error("儲存失敗");
+    } finally {
+      setSaveNoteLoading(false);
+    }
   };
 
   // Build TreeSelect data
@@ -559,6 +605,17 @@ const QAConsolePage = () => {
                         <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{msg.answer}</ReactMarkdown>
                       </div>
                       {renderSources(msg.sources, index)}
+                      {msg.sources?.length > 0 && (
+                        <div style={{ marginTop: 12, textAlign: "right" }}>
+                          <Button
+                            size="small"
+                            icon={<SaveOutlined />}
+                            onClick={() => openSaveNoteModal(msg)}
+                          >
+                            儲存筆記
+                          </Button>
+                        </div>
+                      )}
                     </Card>
                     {(index < conversationHistory.length - 1 || streamingMsg) && <Divider />}
                   </div>
@@ -623,6 +680,48 @@ const QAConsolePage = () => {
           </Card>
         </Col>
       </Row>
+      {/* 儲存筆記 Modal */}
+      <Modal
+        title={<Space><SaveOutlined />儲存筆記至文件</Space>}
+        open={saveNoteModal.visible}
+        onCancel={() => setSaveNoteModal({ visible: false, msg: null })}
+        onOk={handleSaveNote}
+        confirmLoading={saveNoteLoading}
+        okText="儲存"
+        cancelText="取消"
+        width={560}
+      >
+        <div style={{ marginBottom: 16 }}>
+          <Text type="secondary" style={{ fontSize: 13 }}>
+            此回答引用了以下文件，請選擇要歸入哪份文件的筆記本：
+          </Text>
+        </div>
+        <Select
+          style={{ width: "100%", marginBottom: 16 }}
+          value={saveNoteDocId}
+          onChange={setSaveNoteDocId}
+          options={uniqueDocsFromSources(saveNoteModal.msg?.sources).map((s) => ({
+            value: s.document_id,
+            label: `${s.title}${s.score != null ? `（相似度 ${s.score.toFixed(2)}）` : ""}`,
+          }))}
+        />
+        <div style={{ marginBottom: 8 }}>
+          <Text strong>問題（筆記標題）：</Text>
+          <div style={{ padding: "6px 10px", background: "#f5f5f5", borderRadius: 4, marginTop: 4, fontSize: 14 }}>
+            {saveNoteModal.msg?.question}
+          </div>
+        </div>
+        <div>
+          <Text strong>內容預覽：</Text>
+          <div style={{
+            padding: "6px 10px", background: "#f5f5f5", borderRadius: 4, marginTop: 4,
+            fontSize: 13, maxHeight: 160, overflowY: "auto", whiteSpace: "pre-wrap", color: "#595959"
+          }}>
+            {(saveNoteModal.msg?.answer || "").slice(0, 400)}{(saveNoteModal.msg?.answer || "").length > 400 ? "…" : ""}
+          </div>
+        </div>
+      </Modal>
+
       <PdfPreviewModal
         open={pdfPreview.open}
         documentId={pdfPreview.documentId}

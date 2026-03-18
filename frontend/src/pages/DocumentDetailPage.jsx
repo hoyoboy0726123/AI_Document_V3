@@ -1,6 +1,6 @@
 
 import React from 'react';
-import { useNavigate, useParams, useLocation } from 'react-router-dom';
+import { useNavigate, useParams, useLocation, useSearchParams } from 'react-router-dom';
 import AppLayout from '../components/Layout/AppLayout';
 import DocumentDetail from '../components/Documents/DocumentDetail';
 
@@ -8,7 +8,9 @@ const DocumentDetailPage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
-  const { initialPage, initialHighlightKeyword } = location.state || {};
+  const [searchParams] = useSearchParams();
+  const { initialPage: statePage, initialHighlightKeyword } = location.state || {};
+  const initialPage = statePage || (searchParams.get("page") ? parseInt(searchParams.get("page")) : undefined);
 
   return (
     <AppLayout>
