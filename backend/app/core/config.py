@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     DEFAULT_TOP_K: int = 5  # 預設返回的來源數量
     SEARCH_MULTIPLIER: int = 10  # 搜尋倍數（實際搜尋 top_k * multiplier）
 
+    # PDF 多頁 VL 分析上限（受模型 context window 限制）
+    MAX_PDF_ANALYSIS_PAGES: int = 10
+
 
 
     class Config:

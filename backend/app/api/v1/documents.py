@@ -12,7 +12,7 @@ from pdfminer.pdfdocument import PDFPasswordIncorrect
 
 from ... import models, schemas
 from ...core.config import settings
-from ...core.security import get_current_user
+from ...core.security import get_current_user, get_current_admin_user
 from ...database import get_db
 from ...services import ai
 from ...services.documents import DocumentService, run_document_finalize_task, run_upload_analysis_task
@@ -228,7 +228,7 @@ def list_all_keywords(
 def accept_suggestion_recommendations(
     payload: schemas.SuggestionAcceptanceRequest,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_admin_user),
 ):
     metadata_service = _metadata_service(db)
 
@@ -262,7 +262,7 @@ def create_document(
     payload: schemas.DocumentCreate,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_admin_user),
 ):
     logger.info(f"收到文件創建請求：標題='{payload.title}'，用戶={current_user.username}，is_image_based={payload.is_image_based}")
 
@@ -493,6 +493,7 @@ def list_all_notes(
     notes = (
         db.query(models.DocumentNote)
         .join(models.Document, models.DocumentNote.document_id == models.Document.id)
+        .filter(models.DocumentNote.user_id == current_user.id)
         .order_by(models.DocumentNote.created_at.desc())
         .all()
     )
@@ -526,7 +527,7 @@ def update_document(
     document_id: str,
     payload: schemas.DocumentUpdate,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_admin_user),
 ):
     doc_service = _doc_service(db)
     metadata_service = _metadata_service(db)
@@ -565,7 +566,7 @@ def update_document_metadata(
     document_id: str,
     payload: schemas.DocumentMetadataUpdate,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_admin_user),
 ):
     doc_service = _doc_service(db)
     metadata_service = _metadata_service(db)
@@ -602,7 +603,7 @@ def classify_document(
     document_id: str,
     payload: schemas.DocumentClassificationApply,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_admin_user),
 ):
     doc_service = _doc_service(db)
     document = _get_document_or_404(doc_service, document_id)
@@ -618,7 +619,7 @@ def classify_document(
 async def upload_pdf_for_extraction(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_admin_user),
 ):
     if file.content_type not in {"application/pdf", "application/octet-stream"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only PDF files are supported")
@@ -816,28 +817,48 @@ def download_document_pdf(
     return FileResponse(validated_path, media_type="application/pdf", filename=download_filename)
 
 
+@router.get("/{document_id}/analysis")
+def get_document_analysis(
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """取得當前使用者對此文件的 PDF 分析對話紀錄"""
+    _get_document_or_404(_doc_service(db), document_id)
+    row = db.query(models.DocumentUserAnalysis).filter(
+        models.DocumentUserAnalysis.document_id == document_id,
+        models.DocumentUserAnalysis.user_id == current_user.id,
+    ).first()
+    return {"messages": row.messages if row else []}
+
+
+@router.delete("/{document_id}/analysis", status_code=status.HTTP_204_NO_CONTENT)
+def clear_document_analysis(
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """清除當前使用者對此文件的 PDF 分析對話紀錄"""
+    db.query(models.DocumentUserAnalysis).filter(
+        models.DocumentUserAnalysis.document_id == document_id,
+        models.DocumentUserAnalysis.user_id == current_user.id,
+    ).delete()
+    db.commit()
+    return None
+
+
 @router.delete("/{document_id}/history", status_code=status.HTTP_204_NO_CONTENT)
 def clear_document_history(
     document_id: str,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """清除文件的 AI 對話歷史"""
-    doc_service = _doc_service(db)
-    document = _get_document_or_404(doc_service, document_id)
-
-    if document.full_analysis and "conversation_history" in document.full_analysis:
-        # Keep other analysis data, just clear conversation history
-        current = document.full_analysis
-        current["conversation_history"] = []
-        document.full_analysis = current
-        
-        from sqlalchemy.orm.attributes import flag_modified
-        flag_modified(document, "full_analysis")
-        
-        db.add(document)
-        db.commit()
-    
+    """[deprecated] 清除文件的 AI 對話歷史 — 改用 DELETE /{document_id}/analysis"""
+    db.query(models.DocumentUserAnalysis).filter(
+        models.DocumentUserAnalysis.document_id == document_id,
+        models.DocumentUserAnalysis.user_id == current_user.id,
+    ).delete()
+    db.commit()
     return None
 
 
@@ -859,8 +880,9 @@ def create_document_note(
     
     note = models.DocumentNote(
         document_id=document.id,
+        user_id=current_user.id,
         question=payload.question,
-        answer=payload.answer
+        answer=payload.answer,
     )
     db.add(note)
     db.commit()
@@ -879,7 +901,8 @@ def list_document_notes(
     _get_document_or_404(doc_service, document_id)
     
     notes = db.query(models.DocumentNote).filter(
-        models.DocumentNote.document_id == document_id
+        models.DocumentNote.document_id == document_id,
+        models.DocumentNote.user_id == current_user.id,
     ).order_by(models.DocumentNote.created_at.desc()).all()
     return notes
 
@@ -895,12 +918,13 @@ def update_document_note(
     """更新文件筆記"""
     note = db.query(models.DocumentNote).filter(
         models.DocumentNote.id == note_id,
-        models.DocumentNote.document_id == document_id
+        models.DocumentNote.document_id == document_id,
+        models.DocumentNote.user_id == current_user.id,
     ).first()
-    
+
     if not note:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="筆記不存在")
-        
+
     if payload.question is not None:
         note.question = payload.question
     if payload.answer is not None:
@@ -921,12 +945,13 @@ def delete_document_note(
     """刪除文件筆記"""
     note = db.query(models.DocumentNote).filter(
         models.DocumentNote.id == note_id,
-        models.DocumentNote.document_id == document_id
+        models.DocumentNote.document_id == document_id,
+        models.DocumentNote.user_id == current_user.id,
     ).first()
-    
+
     if not note:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="筆記不存在")
-        
+
     db.delete(note)
     db.commit()
     return None
@@ -936,7 +961,7 @@ def delete_document_note(
 def delete_document(
     document_id: str,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_admin_user),
 ):
     """刪除文件及其相關資料（chunks、向量、PDF 檔案）"""
     doc_service = _doc_service(db)
@@ -951,7 +976,7 @@ def delete_document(
 def re_vectorize_document(
     document_id: str,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_admin_user),
 ):
     """
     重新向量化文件

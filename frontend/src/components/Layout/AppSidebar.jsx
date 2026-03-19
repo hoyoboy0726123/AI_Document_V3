@@ -3,21 +3,26 @@ import { Layout, Menu } from "antd";
 import { FileTextOutlined, AppstoreOutlined, BookOutlined, SettingOutlined, RobotOutlined, ThunderboltOutlined, HeartOutlined } from "@ant-design/icons";
 import { useLocation, useNavigate } from "react-router-dom";
 import FolderTree from "../Folders/FolderTree";
+import useAuthStore from "../../stores/authStore";
 
 const { Sider } = Layout;
 
 const AppSidebar = () => {
   const location = useLocation();
   const navigate = useNavigate();
+  const { user } = useAuthStore();
+  const isAdmin = user?.role === "admin";
 
   const menuItems = [
     { key: "/documents", icon: <FileTextOutlined />, label: "文件列表" },
-    { key: "/documents/new", icon: <AppstoreOutlined />, label: "建立文件" },
+    ...(isAdmin ? [{ key: "/documents/new", icon: <AppstoreOutlined />, label: "建立文件" }] : []),
     { key: "/qa", icon: <RobotOutlined />, label: "RAG智慧問答" },
     { key: "/notebook", icon: <BookOutlined />, label: "我的筆記本" },
-    { key: "/admin/metadata", icon: <SettingOutlined />, label: "管理介面" },
-    { key: "/admin/vector-search", icon: <ThunderboltOutlined />, label: "向量查詢測試" },
-    { key: "/admin/vector-health", icon: <HeartOutlined />, label: "向量庫健康" },
+    ...(isAdmin ? [
+      { key: "/admin/metadata", icon: <SettingOutlined />, label: "管理介面" },
+      { key: "/admin/vector-search", icon: <ThunderboltOutlined />, label: "向量查詢測試" },
+      { key: "/admin/vector-health", icon: <HeartOutlined />, label: "向量庫健康" },
+    ] : []),
   ];
 
   const selectedKey = useMemo(() => {

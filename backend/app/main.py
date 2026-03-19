@@ -107,6 +107,14 @@ def ensure_schema_updates() -> None:
                     else:
                         connection.execute(text("ALTER TABLE background_tasks ADD COLUMN result JSON"))
 
+        # Check document_notes table columns
+        if inspector.has_table('document_notes'):
+            note_columns = {col['name'] for col in inspector.get_columns('document_notes')}
+            with engine.begin() as connection:
+                if "user_id" not in note_columns:
+                    logger.info("Adding user_id column to document_notes table")
+                    connection.execute(text("ALTER TABLE document_notes ADD COLUMN user_id VARCHAR(36) REFERENCES users(id)"))
+
         logger.info("Schema updates completed successfully")
 
     except Exception as e:

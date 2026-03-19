@@ -422,15 +422,17 @@ def extract_text_with_vision(
         return buf.getvalue()
 
     prompt = (
-        "Extract ALL text from this PDF page exactly as it appears.\n"
-        "Rules:\n"
-        "- Preserve the original structure: indentation, line breaks, and hierarchy.\n"
-        "- For tables, clearly show which values belong to which row/column label.\n"
-        "  Example: 'Parameter | Condition A | Condition B'\n"
-        "           'Value X   | 100 units   | 200 units'\n"
-        "- For lists with sub-items, use indentation to show the relationship.\n"
-        "- Output ONLY the extracted text. No explanations, no comments.\n"
-        "- If the page contains images or diagrams, briefly describe them in [brackets]."
+        "You are a document digitization assistant. Process this PDF page and output two things IN ORDER:\n\n"
+        "1. IMAGES & DIAGRAMS: For every image, chart, diagram, or figure on the page, write a description inside [IMAGE: ...]. "
+        "Describe what it shows, key elements, labels, arrows, and any text embedded in it. "
+        "Example: [IMAGE: Flowchart showing 3 steps: Input → Process → Output. Step labels in Chinese read '資料輸入', '模型運算', '結果輸出'.]\n\n"
+        "2. TEXT CONTENT: Extract ALL visible text on the page, preserving structure:\n"
+        "   - Keep indentation and hierarchy for lists and sub-items.\n"
+        "   - For tables, preserve row/column relationships. Example:\n"
+        "     項目 | 條件A | 條件B\n"
+        "     數值 | 100   | 200\n"
+        "   - Include ALL text, including captions, labels, footnotes, and headers.\n\n"
+        "Do NOT skip images. Do NOT add commentary outside of the above format."
     )
 
     for img_bytes, page_num in zip(image_bytes_list, page_numbers):
@@ -484,22 +486,27 @@ def analyze_pdf_page_images_singleturn(
     )
 
     system_rules = (
-        "You are a helpful technical assistant for analyzing documents. Your answers must be in Traditional Chinese (Taiwan).\n"
-        "- Strictly NO Simplified Chinese characters.\n"
-        "- Analyze the provided images and answer the user's question based *only* on the content of the images.\n"
-        "- If the images contain tables, charts, or diagrams, describe them in detail.\n"
-        "- Provide a comprehensive and detailed answer.\n"
-        "- Use bullet points for clarity when appropriate.\n"
-        "- Do not output control tokens or any internal thoughts.\n"
-        "- If the information in the images is insufficient to answer the question, clearly state what is missing in Traditional Chinese.\n"
+        "您是專業的文件分析助理，請使用流暢自然的繁體中文（台灣）回答。\n"
+        "分析規則（必須全部遵守）：\n"
+        "1. 【圖片與圖表】頁面中每一張圖片、示意圖、流程圖、架構圖，都必須主動描述：\n"
+        "   - 圖的主題與用途\n"
+        "   - 圖中的主要元素、標籤、箭頭關係\n"
+        "   - 圖中嵌入的所有文字\n"
+        "   範例格式：【圖片說明】此圖為三步驟流程：資料輸入 → 模型運算 → 結果輸出。\n"
+        "2. 【表格】保留行列對應關係，整理為清晰條列。\n"
+        "3. 【文字內容】提取所有可見文字，包含標題、說明、標籤、附註。\n"
+        "4. 針對使用者的問題提供精確回答，但圖片描述不可省略。\n"
+        "5. 嚴禁使用簡體中文。\n"
     )
 
     composed = (
-        "Context (previous conversation, for reference only):\n"
-        f"{history_text or '(none)'}\n\n"
-        "Based on the provided images, perform the following task:\n"
-        f"- For the document pages ({page_label}), answer this question: {user_prompt}\n\n"
-        "Final Answer (in Traditional Chinese):\n"
+        "上下文 (參考用):\n"
+        f"{history_text or '(無)'}\n\n"
+        "任務指令:\n"
+        f"請分析圖片內容 (頁碼: {page_label})。\n"
+        "【重要】頁面中的圖片、圖表、示意圖必須逐一描述，不可略過。\n"
+        f"問題：{user_prompt}\n\n"
+        "回答 (繁體中文):\n"
     )
 
     messages = [
@@ -522,36 +529,65 @@ def analyze_pdf_page_images_stream(
     """Streamed version of single-turn analysis.
 
     Yields dicts: {"type": "thinking"|"content", "text": "..."}
+
+    No-question mode: one VL request per page to ensure all pages are analyzed.
+    Question mode: single request with all images so the answer can span pages.
     """
     if not image_bytes_list:
         raise ValueError("no page images provided")
 
     client = get_client()
-    images = [base64.b64encode(img).decode("utf-8") for img in image_bytes_list]
-    page_label = ", ".join(map(str, page_numbers))
-    user_prompt = (question or "Summarize the key points from these pages.").strip()
+    has_question = bool(question and question.strip())
+    user_prompt = question.strip() if has_question else None
 
     history_text = "\n".join(
         f"Q: {turn.get('question','')}\nA: {turn.get('answer','')}\n" for turn in (conversation_history or [])[-3:]
     )
 
     system_rules = (
-        "您是專業的文件分析助理，請使用流暢自然的繁體中文（台灣）回答。\n"
-        "任務目標：\n"
-        "1. 仔細閱讀圖片中的文字與圖表。\n"
-        "2. 針對使用者的問題提供精確、重點式的回答。\n"
-        "3. 若遇到表格或數據，請整理為清晰的條列式重點。\n"
-        "4. 保持語句通順，避免贅字或重複詞彙。\n"
-        "5. 除非必要，否則直接回答問題，不需過多開場白。\n"
+        "您是專業的文件深度分析助理，請使用流暢自然的繁體中文（台灣）輸出完整分析報告。\n"
+        "分析規則（必須全部遵守）：\n"
+        "1. 【圖片與圖表】頁面中每一張圖片、示意圖、流程圖、架構圖，都必須主動描述：\n"
+        "   - 圖的主題與用途\n"
+        "   - 圖中的主要元素、標籤、箭頭關係與邏輯流向\n"
+        "   - 圖中嵌入的所有文字（包含英文標籤）\n"
+        "   格式：【圖片說明】...\n"
+        "2. 【表格】完整保留行列對應關係，以條列方式呈現每筆資料。\n"
+        "3. 【文字內容】提取所有可見文字，包含標題、副標題、說明、標籤、備註、頁首頁尾。\n"
+        "4. 【重點摘要】每頁結束後，列出 3–5 個該頁的核心重點（條列式）。\n"
+        "5. 回答必須完整詳細，不可因篇幅考量而省略任何內容。\n"
+        "6. 嚴禁使用簡體中文。\n"
     )
 
+    images = [base64.b64encode(img).decode("utf-8") for img in image_bytes_list]
+    page_label = ", ".join(map(str, page_numbers))
+    n = len(page_numbers)
+
+    if has_question:
+        task = (
+            f"請根據以下頁面（頁碼：{page_label}）的內容，詳細回答使用者的問題。\n"
+            "回答時若頁面中有圖片或圖表，須一併描述說明，不可省略。\n"
+            f"【問題】{user_prompt}\n"
+        )
+    else:
+        task = (
+            f"請綜合分析以下 {n} 頁文件（頁碼：{page_label}），輸出整合性解析報告，格式如下：\n\n"
+            "## 整體主題\n"
+            "這幾頁整體在描述什麼？目的與背景為何？\n\n"
+            "## 各頁重點\n"
+            f"依序說明每一頁（共 {n} 頁）的核心內容，每頁 2–4 條重點。\n\n"
+            "## 圖表與視覺資訊\n"
+            "描述頁面中重要的圖片、流程圖、架構圖或表格，說明其意義。\n\n"
+            "## 跨頁關聯\n"
+            "說明各頁之間的邏輯關係、延伸脈絡，或共同指向的結論。\n\n"
+            "## 核心重點摘要\n"
+            "列出 5–8 條最重要的資訊或結論（條列式）。\n"
+        )
+
     composed = (
-        "上下文 (參考用):\n"
-        f"{history_text or '(無)'}\n\n"
-        "任務指令:\n"
-        f"請根據圖片內容 (頁碼: {page_label})，回答以下問題：\n"
-        f"{user_prompt}\n\n"
-        "回答 (繁體中文):"
+        f"上下文（參考用）:\n{history_text or '(無)'}\n\n"
+        f"{task}\n"
+        "回答（繁體中文）："
     )
 
     messages = [

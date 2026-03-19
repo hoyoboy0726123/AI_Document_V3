@@ -13,7 +13,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url,
 ).toString();
 
-const MAX_MULTI_ANALYSIS_PAGES = 10;
+const DEFAULT_MAX_ANALYSIS_PAGES = 10;
 
 const PdfPreviewModal = ({
   open,
@@ -42,10 +42,17 @@ const PdfPreviewModal = ({
   const [showSearchResults, setShowSearchResults] = useState(false);
   const [highlightKeyword, setHighlightKeyword] = useState("");
   const [savingNote, setSavingNote] = useState(false);
+  const [maxAnalysisPages, setMaxAnalysisPages] = useState(DEFAULT_MAX_ANALYSIS_PAGES);
 
   const pdfContainerRef = useRef(null);
   const pendingHighlightKeyword = useRef("");
   const streamControllerRef = useRef(null);
+
+  useEffect(() => {
+    apiClient.get("/rag/config")
+      .then((res) => setMaxAnalysisPages(res.data?.max_pdf_analysis_pages ?? DEFAULT_MAX_ANALYSIS_PAGES))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (open) {
@@ -72,25 +79,20 @@ const PdfPreviewModal = ({
 
   const fetchHistory = async () => {
     try {
-      const res = await apiClient.get(`/documents/${documentId}`);
-      if (res.data.full_analysis && Array.isArray(res.data.full_analysis.conversation_history)) {
-        const history = res.data.full_analysis.conversation_history;
-        setConversationHistory(history);
-        if (history.length > 0) {
-          setShowAnalysis(true);
-        }
-      } else {
-        setConversationHistory([]);
-      }
+      const res = await apiClient.get(`/documents/${documentId}/analysis`);
+      const history = res.data?.messages ?? [];
+      setConversationHistory(history);
+      if (history.length > 0) setShowAnalysis(true);
     } catch (err) {
       console.error("Failed to fetch history", err);
+      setConversationHistory([]);
     }
   };
 
   const handleClearHistory = async () => {
     if (!documentId) return;
     try {
-      await apiClient.delete(`/documents/${documentId}/history`);
+      await apiClient.delete(`/documents/${documentId}/analysis`);
       setConversationHistory([]);
       message.success("對話紀錄已清除");
     } catch (err) {
@@ -325,8 +327,8 @@ const PdfPreviewModal = ({
       message.info(`第 ${pageNumber} 頁已在多頁分析清單中`);
       return;
     }
-    if (selectedPages.length >= MAX_MULTI_ANALYSIS_PAGES) {
-      message.warning(`最多僅能加入 ${MAX_MULTI_ANALYSIS_PAGES} 頁`);
+    if (selectedPages.length >= maxAnalysisPages) {
+      message.warning(`最多僅能加入 ${maxAnalysisPages} 頁`);
       return;
     }
     setSelectedPages((prev) => {
@@ -394,7 +396,7 @@ const PdfPreviewModal = ({
       return;
     }
 
-    const uniquePages = Array.from(new Set(selectedPages)).slice(0, MAX_MULTI_ANALYSIS_PAGES);
+    const uniquePages = Array.from(new Set(selectedPages)).slice(0, maxAnalysisPages);
     const customQuestion = analysisQuestion.trim();
     try {
       setAnalyzedPages(uniquePages);
@@ -565,7 +567,6 @@ const PdfPreviewModal = ({
                 placeholder="想讓 AI 聚焦的問題（可留空）"
                 value={analysisQuestion}
                 onChange={(e) => setAnalysisQuestion(e.target.value)}
-                onPressEnter={handleAnalyzeCurrentPage}
                 disabled={analyzing}
                 style={{ width: 280 }}
               />
@@ -574,7 +575,7 @@ const PdfPreviewModal = ({
               </Button>
               <Button
                 onClick={handleAddCurrentPageToSelection}
-                disabled={selectedPages.includes(pageNumber) || selectedPages.length >= MAX_MULTI_ANALYSIS_PAGES}
+                disabled={selectedPages.includes(pageNumber) || selectedPages.length >= maxAnalysisPages}
               >
                 加入多頁清單
               </Button>
@@ -606,7 +607,7 @@ const PdfPreviewModal = ({
             {selectedPages.length > 0 && (
               <Space size={[4, 4]} wrap style={{ marginBottom: 12 }}>
                 <Typography.Text type="secondary">
-                  多頁分析列表（{selectedPages.length}/{MAX_MULTI_ANALYSIS_PAGES}）
+                  多頁分析列表（{selectedPages.length}/{maxAnalysisPages}）
                 </Typography.Text>
                 {selectedPages.map((page) => (
                   <Tag
@@ -756,14 +757,6 @@ const PdfPreviewModal = ({
                     onChange={(e) => setFollowupQuestion(e.target.value)}
                     autoSize={{ minRows: 2, maxRows: 4 }}
                     disabled={analyzing || analyzedPages.length === 0}
-                    onPressEnter={(e) => {
-                      if (!e.shiftKey) {
-                        e.preventDefault();
-                        const pagesParam = (analyzedPages && analyzedPages.length) ? analyzedPages : [pageNumber];
-                        startStreamAnalysis(pagesParam, followupQuestion.trim(), buildHistoryPayload());
-                        setFollowupQuestion("");
-                      }
-                    }}
                   />
                   <Button
                     type="primary"

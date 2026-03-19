@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from ... import models, schemas
+from ...core.config import settings
 from ...core.security import get_current_user
 from ...database import get_db
 from ...services import ai, pdf_image, vector_store
@@ -346,7 +347,15 @@ async def analyze_pdf_pages(
         )
 
     unique_pages = list(dict.fromkeys(payload.page_numbers))
-    image_bytes_list = pdf_image.pdf_pages_to_images(pdf_full_path, unique_pages)
+    if len(unique_pages) > settings.MAX_PDF_ANALYSIS_PAGES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"一次最多分析 {settings.MAX_PDF_ANALYSIS_PAGES} 頁，請減少頁數後重試",
+        )
+    if len(unique_pages) > 1:
+        image_bytes_list = pdf_image.pdf_pages_to_images(pdf_full_path, unique_pages, dpi=100, max_dimension=1024)
+    else:
+        image_bytes_list = pdf_image.pdf_pages_to_images(pdf_full_path, unique_pages)
     history = (
         [{"question": m.question, "answer": m.answer} for m in payload.conversation_history]
         if payload.conversation_history
@@ -388,7 +397,16 @@ def analyze_pdf_pages_stream(
         )
 
     unique_pages = list(dict.fromkeys(payload.page_numbers))
-    image_bytes_list = pdf_image.pdf_pages_to_images(pdf_full_path, unique_pages)
+    if len(unique_pages) > settings.MAX_PDF_ANALYSIS_PAGES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"一次最多分析 {settings.MAX_PDF_ANALYSIS_PAGES} 頁，請減少頁數後重試",
+        )
+    # 多頁分析降低解析度避免 context overflow；單頁維持原始高解析度
+    if len(unique_pages) > 1:
+        image_bytes_list = pdf_image.pdf_pages_to_images(pdf_full_path, unique_pages, dpi=100, max_dimension=1024)
+    else:
+        image_bytes_list = pdf_image.pdf_pages_to_images(pdf_full_path, unique_pages)
     history = (
         [{"question": m.question, "answer": m.answer} for m in payload.conversation_history]
         if payload.conversation_history
@@ -427,15 +445,8 @@ def analyze_pdf_pages_stream(
                         final_content = final_answer
                         yield _sse_event("content", {"text": final_answer})
             
-            # Save conversation history to DB
+            # Save conversation history to per-user DB table
             try:
-                # Refresh document to ensure we have the latest state
-                db.refresh(document)
-                
-                current_analysis = document.full_analysis or {}
-                history_list = current_analysis.get("conversation_history", [])
-                
-                # Determine the question label
                 question_label = payload.question
                 if not question_label:
                     if len(unique_pages) == 1:
@@ -447,19 +458,24 @@ def analyze_pdf_pages_stream(
                     "question": question_label,
                     "answer": final_content,
                     "page_numbers": unique_pages,
-                    "timestamp": str(datetime.now())
+                    "timestamp": str(datetime.now()),
                 }
-                
-                history_list.append(new_entry)
-                current_analysis["conversation_history"] = history_list
-                
-                # Update and commit
-                document.full_analysis = current_analysis
-                # Force update for SQLAlchemy mutable dict
-                from sqlalchemy.orm.attributes import flag_modified
-                flag_modified(document, "full_analysis")
-                
-                db.add(document)
+
+                row = db.query(models.DocumentUserAnalysis).filter(
+                    models.DocumentUserAnalysis.document_id == payload.document_id,
+                    models.DocumentUserAnalysis.user_id == current_user.id,
+                ).first()
+                if row:
+                    from sqlalchemy.orm.attributes import flag_modified
+                    row.messages = row.messages + [new_entry]
+                    flag_modified(row, "messages")
+                else:
+                    row = models.DocumentUserAnalysis(
+                        document_id=payload.document_id,
+                        user_id=current_user.id,
+                        messages=[new_entry],
+                    )
+                    db.add(row)
                 db.commit()
             except Exception as db_err:
                 print(f"Failed to save conversation history: {db_err}")
@@ -469,4 +485,57 @@ def analyze_pdf_pages_stream(
             yield _sse_event("error", {"message": str(e)})
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
+# ===== Per-user conversation history =====
+
+@router.get("/config")
+def get_rag_config(current_user=Depends(get_current_user)):
+    """回傳前端需要的 RAG 相關設定值"""
+    return {"max_pdf_analysis_pages": settings.MAX_PDF_ANALYSIS_PAGES}
+
+
+@router.get("/conversation")
+def get_conversation(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """取得當前使用者的對話紀錄"""
+    row = db.query(models.UserConversation).filter(
+        models.UserConversation.user_id == current_user.id
+    ).first()
+    return {"messages": row.messages if row else []}
+
+
+@router.put("/conversation")
+def save_conversation(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """儲存當前使用者的對話紀錄"""
+    messages = payload.get("messages", [])
+    row = db.query(models.UserConversation).filter(
+        models.UserConversation.user_id == current_user.id
+    ).first()
+    if row:
+        row.messages = messages
+    else:
+        row = models.UserConversation(user_id=current_user.id, messages=messages)
+        db.add(row)
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/conversation", status_code=204)
+def clear_conversation(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """清除當前使用者的對話紀錄"""
+    db.query(models.UserConversation).filter(
+        models.UserConversation.user_id == current_user.id
+    ).delete()
+    db.commit()
+    return None
 

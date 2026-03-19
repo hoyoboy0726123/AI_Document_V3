@@ -82,34 +82,63 @@ docker compose up --build
 
 ---
 
-## 3. 用 uv 安裝 backend
+## 3. 安裝 backend 依賴
 
-`backend/` 已補上 `pyproject.toml`，可以直接用 `uv` 建立虛擬環境與安裝依賴。
+提供兩種方式，擇一即可：
+
+### 方式 A：uv（推薦）
+
+`uv` 速度快、自動管理虛擬環境，推薦第一次使用本專案的人優先選這種方式。
+
+若還沒安裝 uv：
+
+```bash
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows PowerShell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+安裝依賴：
 
 ```bash
 cd backend
 uv sync
 ```
 
-如果你的機器還沒裝 uv：
+啟用虛擬環境（可選，uv run 會自動使用）：
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-### 啟用虛擬環境
-
-Linux / macOS:
-
-```bash
+# macOS / Linux
 source .venv/bin/activate
-```
 
-Windows PowerShell:
-
-```powershell
+# Windows PowerShell
 .venv\Scripts\Activate.ps1
 ```
+
+### 方式 B：pip
+
+若你不想裝 uv，也可以用標準的 pip 方式：
+
+```bash
+cd backend
+python -m venv .venv
+
+# macOS / Linux
+source .venv/bin/activate
+
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+
+pip install -r requirements.txt
+```
+
+> 注意：`requirements.txt` 若不存在，可從 `pyproject.toml` 匯出：
+> ```bash
+> pip install uv
+> uv export --no-hashes -o requirements.txt
+> ```
 
 ---
 
@@ -132,7 +161,7 @@ SECRET_KEY=換成你自己的長隨機字串
 ```bash
 ollama pull qwen3:8b
 ollama pull qwen2.5vl:7b
-ollama pull quentinz/bge-large-zh-v1.5:latest
+ollama pull qwen3-embedding:8b
 ```
 
 預設 `.env`：
@@ -141,7 +170,7 @@ ollama pull quentinz/bge-large-zh-v1.5:latest
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_LLM_MODEL=qwen3:8b
 OLLAMA_VISION_MODEL=qwen2.5vl:7b
-OLLAMA_EMBED_MODEL=quentinz/bge-large-zh-v1.5:latest
+OLLAMA_EMBED_MODEL=qwen3-embedding:8b
 ```
 
 ---
@@ -223,14 +252,24 @@ npm run dev
 
 ## 9. 快速安裝摘要
 
-### Backend
+### Backend（uv）
 
 ```bash
 cd backend
 uv sync
-cp .env_example .env
-# 編輯 .env
+cp .env_example .env   # 再編輯 .env
 uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+### Backend（pip）
+
+```bash
+cd backend
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+cp .env_example .env        # 再編輯 .env
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ### Frontend
@@ -239,6 +278,13 @@ uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 cd frontend
 npm install
 npm run dev
+```
+
+### Docker（最快）
+
+```bash
+cp backend/.env_example backend/.env   # 再編輯 .env
+docker compose up --build
 ```
 
 ---

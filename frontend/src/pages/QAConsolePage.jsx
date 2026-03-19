@@ -81,15 +81,14 @@ const QAConsolePage = () => {
 
   useEffect(() => {
     loadInitialData();
-    const savedHistory = localStorage.getItem("qa_conversation_history");
-    if (savedHistory) {
-      try { setConversationHistory(JSON.parse(savedHistory)); } catch {}
-    }
+    apiClient.get("rag/conversation")
+      .then((res) => setConversationHistory(res.data?.messages ?? []))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
     if (conversationHistory.length > 0) {
-      localStorage.setItem("qa_conversation_history", JSON.stringify(conversationHistory));
+      apiClient.put("rag/conversation", { messages: conversationHistory }).catch(() => {});
     }
   }, [conversationHistory]);
 
@@ -288,7 +287,7 @@ const QAConsolePage = () => {
 
   const clearHistory = () => {
     setConversationHistory([]);
-    localStorage.removeItem("qa_conversation_history");
+    apiClient.delete("rag/conversation").catch(() => {});
     message.success("對話歷史已清除");
   };
 

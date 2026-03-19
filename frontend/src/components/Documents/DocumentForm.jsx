@@ -156,27 +156,49 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
       setOcrProcessing(true);
       setOcrModalVisible(false);
 
-      // 建立文件
-      setProcessingStatus("正在建立文件...");
       const title = form.getFieldValue("title") || ocrData.filename.replace(/\.pdf$/i, "");
       const metadata = form.getFieldValue("metadata") || {};
       const classification_id = form.getFieldValue("classification_id");
 
-      const payload = {
-        title,
-        content: "", // 圖片型 PDF 無內容
-        metadata,
-        classification_id: classification_id || null,
-        source_pdf_path: ocrData.pdf_temp_path,
-        is_image_based: true, // 標記為圖片型 PDF
-      };
+      if (mode === "vl") {
+        // VL 視覺模型解析：當作普通 PDF 送出，後端背景排程 vl_vectorize
+        setProcessingStatus("正在建立文件並啟動 VL 解析...");
+        const payload = {
+          title,
+          content: "",
+          metadata,
+          classification_id: classification_id || null,
+          source_pdf_path: ocrData.pdf_temp_path,
+          is_image_based: false, // 讓後端走背景任務路徑
+          force_vision: true,
+        };
+        const resp = await apiClient.post("documents/", payload);
+        const taskId = resp.data?.task_id;
+        const docId = resp.data?.id;
+        const docTitle = resp.data?.title ?? title;
+        if (taskId && docId) {
+          addTask({ task_id: taskId, document_id: docId, document_title: docTitle });
+          message.success("文件已建立，VL 視覺解析正在背景執行，完成後即可搜尋");
+        } else {
+          message.success("文件已建立");
+        }
+      } else {
+        // 僅供預覽（skip）
+        setProcessingStatus("正在建立文件...");
+        const payload = {
+          title,
+          content: "",
+          metadata,
+          classification_id: classification_id || null,
+          source_pdf_path: ocrData.pdf_temp_path,
+          is_image_based: true,
+        };
+        const createResp = await apiClient.post("documents/", payload);
+        const documentId = createResp.data.id;
+        await apiClient.post(`documents/${documentId}/ocr/process`, { mode: "skip" });
+        message.success("文件已建立（僅支持預覽功能）");
+      }
 
-      const createResp = await apiClient.post("documents/", payload);
-      const documentId = createResp.data.id;
-
-      // 標記為 skipped（僅供預覽）
-      await apiClient.post(`documents/${documentId}/ocr/process`, { mode: "skip" });
-      message.success("文件已建立（僅支持預覽功能）");
       setProcessingStatus("");
       onSuccess?.();
     } catch (error) {
@@ -779,38 +801,67 @@ const DocumentForm = ({ document, onSuccess, onCancel, loading = false }) => {
 
       {/* OCR 選項 Modal */}
       <Modal
-        title="圖片型 PDF - 僅支持預覽"
+        title="偵測到圖片型 PDF"
         open={ocrModalVisible}
-        onOk={() => handleOcrChoice("skip")}
         onCancel={() => setOcrModalVisible(false)}
-        okText="確認並保存"
-        cancelText="取消"
-        width={600}
+        footer={null}
+        width={620}
       >
         <Space direction="vertical" style={{ width: "100%" }} size="large">
           <Alert
-            message="此 PDF 無法提取文字內容"
-            description={`這可能是掃描件或傳真文件（共 ${ocrData?.total_pages || "?"} 頁）。圖片型 PDF 僅提供預覽功能，無法進行全文檢索或 AI 問答。`}
+            message="此 PDF 無法直接提取文字"
+            description={`這可能是掃描件、傳真或 PPT 轉檔（共 ${ocrData?.total_pages || "?"} 頁），請選擇處理方式。`}
             type="warning"
             showIcon
           />
 
-          <Typography.Paragraph>
-            <Typography.Text strong>功能限制說明：</Typography.Text>
-          </Typography.Paragraph>
+          <div style={{ display: "flex", gap: 16 }}>
+            {/* VL 解析選項 */}
+            <Card
+              hoverable
+              style={{ flex: 1, borderColor: "#1677ff", cursor: "pointer" }}
+              onClick={() => !ocrProcessing && handleOcrChoice("vl")}
+            >
+              <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                <Typography.Text strong style={{ fontSize: 15, color: "#1677ff" }}>
+                  🤖 VL 視覺模型解析（建議）
+                </Typography.Text>
+                <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: "#444" }}>
+                  <li>✅ 提取所有可見文字及排版結構</li>
+                  <li>✅ 識別並描述圖片、圖表內容</li>
+                  <li>✅ 保留表格的行列關係</li>
+                  <li>✅ 支援全文檢索與 AI 問答</li>
+                  <li>⏳ 解析時間較長（每頁約 10–30 秒）</li>
+                </ul>
+              </Space>
+            </Card>
 
-          <Typography.Paragraph>
-            <ul>
-              <li>✓ 可以查看 PDF 預覽</li>
-              <li>✓ 可以填寫和管理 metadata</li>
-              <li>✗ 無法進行全文檢索</li>
-              <li>✗ 無法使用 AI 問答功能</li>
-            </ul>
-          </Typography.Paragraph>
+            {/* 僅預覽選項 */}
+            <Card
+              hoverable
+              style={{ flex: 1, cursor: "pointer" }}
+              onClick={() => !ocrProcessing && handleOcrChoice("skip")}
+            >
+              <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                <Typography.Text strong style={{ fontSize: 15 }}>
+                  👁 僅供預覽
+                </Typography.Text>
+                <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: "#444" }}>
+                  <li>✅ 可查看 PDF 原始頁面</li>
+                  <li>✅ 可管理 metadata</li>
+                  <li>❌ 無法全文檢索</li>
+                  <li>❌ 無法 AI 問答</li>
+                  <li>⚡ 立即完成，無等待</li>
+                </ul>
+              </Space>
+            </Card>
+          </div>
 
-          <Typography.Paragraph type="secondary">
-            點擊「確認並保存」將文件標記為僅供預覽，請確保已填寫必要的 metadata。
-          </Typography.Paragraph>
+          {ocrProcessing && (
+            <div style={{ textAlign: "center" }}>
+              <Spin tip={processingStatus || "處理中..."} />
+            </div>
+          )}
         </Space>
       </Modal>
     </Card>

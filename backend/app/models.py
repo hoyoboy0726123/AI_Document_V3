@@ -259,6 +259,30 @@ class SystemConfig(Base):
     updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class DocumentUserAnalysis(Base):
+    """Per-user, per-document PDF analysis conversation history"""
+    __tablename__ = "document_user_analyses"
+
+    document_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), primary_key=True)
+    messages: Mapped[list] = mapped_column(MutableList.as_mutable(JSON), default=list, nullable=False)
+    updated_at: Mapped[Optional[DateTime]] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    document: Mapped["Document"] = relationship("Document")
+    user: Mapped["User"] = relationship("User")
+
+
+class UserConversation(Base):
+    """Per-user QA conversation history (replaces localStorage)"""
+    __tablename__ = "user_conversations"
+
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), primary_key=True)
+    messages: Mapped[list] = mapped_column(MutableList.as_mutable(JSON), default=list, nullable=False)
+    updated_at: Mapped[Optional[DateTime]] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    user: Mapped["User"] = relationship("User")
+
+
 class DocumentNote(BaseMixin, Base):
     """
     User saved notes from AI conversation.
@@ -266,7 +290,9 @@ class DocumentNote(BaseMixin, Base):
     __tablename__ = "document_notes"
 
     document_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), nullable=False, index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("users.id"), nullable=True, index=True)
     question: Mapped[str] = mapped_column(Text, nullable=False)
     answer: Mapped[str] = mapped_column(Text, nullable=False)
-    
+
     document: Mapped[Document] = relationship("Document", back_populates="notes")
+    user: Mapped[Optional[User]] = relationship("User")
