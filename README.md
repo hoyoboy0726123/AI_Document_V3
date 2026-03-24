@@ -27,7 +27,7 @@ AI_Document_V3/
 - Node.js 20+（建議 22）
 - npm
 - [uv](https://docs.astral.sh/uv/)
-- Ollama（如果要啟用 embedding / LLM / vision）
+- Ollama（啟用 LLM / Embedding / Vision 功能必須安裝）
 
 Linux / WSL 建議先安裝：
 - `build-essential`
@@ -36,6 +36,54 @@ Linux / WSL 建議先安裝：
 - `libsm6`
 - `libxrender1`
 - `libxext6`
+
+---
+
+## 0. 安裝 Ollama（必要前置步驟）
+
+本系統的 LLM 問答、向量嵌入、VL 圖片分析均依賴 Ollama，**請在啟動本專案前先完成安裝**。
+
+### 下載 Ollama
+
+前往官網下載對應平台的安裝包：
+
+**https://ollama.com/download**
+
+| 平台 | 安裝方式 |
+|------|---------|
+| macOS | 下載 `.dmg` 安裝，完成後 Ollama 會常駐在選單列 |
+| Windows | 下載 `.exe` 安裝程式，完成後 Ollama 會常駐在系統匣 |
+| Linux | 執行一鍵安裝指令（見下方） |
+
+**Linux 一鍵安裝：**
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+### 確認 Ollama 正常運行
+
+```bash
+ollama --version
+```
+
+### 下載所需模型
+
+```bash
+ollama pull qwen3:8b           # LLM（問答 / 摘要）
+ollama pull qwen2.5vl:7b       # 視覺模型（PDF 圖片分析）
+ollama pull qwen3-embedding:8b # 向量嵌入（語意搜尋）
+```
+
+> 首次下載需要一段時間，依網路速度與模型大小而定（合計約 15–20 GB）。
+
+### 確認模型已就緒
+
+```bash
+ollama list
+```
+
+看到三個模型都在清單中即可繼續下一步。
 
 ---
 
