@@ -17,6 +17,7 @@ dependencies = [
   "bcrypt==4.0.1",
   "python-multipart",
   "pdfminer.six",
+  "pdfplumber",
   "httpx",
   "faiss-cpu",
   "numpy",
