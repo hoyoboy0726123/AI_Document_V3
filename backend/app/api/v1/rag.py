@@ -74,8 +74,8 @@ def _context_text_budgeted(db: Session, chunk, ctx_used: int) -> str:
     """在「總 context 預算」內做鄰塊擴展；預算用完就退回原始小塊，避免超過 num_ctx。"""
     base = chunk.text or ""
     radius = getattr(settings, "RAG_NEIGHBOR_RADIUS", 1)
-    per_cap = getattr(settings, "RAG_EXPAND_MAX_CHARS", 2800)
-    total_budget = getattr(settings, "RAG_CONTEXT_BUDGET_CHARS", 11000)
+    per_cap = getattr(settings, "RAG_EXPAND_MAX_CHARS", 2000)
+    total_budget = ai.effective_rag_budget()
     remaining = total_budget - ctx_used
     if radius <= 0 or remaining <= len(base):
         return base

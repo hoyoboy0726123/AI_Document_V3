@@ -84,10 +84,10 @@ class Settings(BaseSettings):
     # 避免句子被切塊邊界截斷（搜尋精度用小塊、上下文完整性用擴展後的大塊）。
     RAG_NEIGHBOR_RADIUS: int = 1               # 0 = 關閉擴展；1 = 帶 k-1/k+1
     RAG_EXPAND_MAX_CHARS: int = 2000           # 單一來源擴展後的字數上限
-    # 所有來源餵入 LLM 的總字數上限，避免超過模型 context window（num_ctx）導致
-    # prompt 被從頭截斷、模型遺失問題與指令。超出後不再擴展、改用原始小塊。
-    # 注意：須與 OLLAMA_NUM_CTX 搭配——input+output 共用同一視窗，這裡要留生成空間。
+    # 所有來源餵入 LLM 的總字數「上限」(實際還會依 num_ctx 動態夾限，見 effective_rag_budget)。
+    # input+output 共用同一 context window，須留生成空間。8192 視窗下 6000 字安全。
     RAG_CONTEXT_BUDGET_CHARS: int = 6000
+    RAG_OUTPUT_RESERVE_CHARS: int = 1800       # 預留給「生成」的視窗額度（夾限時扣除）
 
 
 

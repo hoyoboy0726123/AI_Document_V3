@@ -70,7 +70,8 @@ def _tool_rag_search(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
             "title": doc.title,
             "page": chunk.page,
             "score": round(score, 4),
-            "snippet": (chunk.text or "")[:800],
+            # 放寬截斷：snippet 同時用於 ReAct 推理與最後的 grounded 合成引用
+            "snippet": (chunk.text or "")[:1400],
         })
         if len(out) >= top_k:
             break

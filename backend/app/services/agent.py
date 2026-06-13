@@ -20,8 +20,10 @@ from typing import Any, Dict, Generator, List, Optional
 
 from sqlalchemy.orm import Session
 
-from . import agent_tools
+from . import agent_tools, ai
+from ..core.config import settings
 from .llm_provider import get_llm_provider
+from .system_config import SystemConfigService
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +96,71 @@ def _build_history_messages(conversation_history: List[Dict[str, Any]]) -> List[
     return msgs
 
 
+def _grounded_synthesis(
+    db: Session,
+    question: str,
+    rag_evidence: List[Dict[str, Any]],
+    kg_notes: List[str],
+    conversation_history: Optional[List[Dict[str, Any]]],
+) -> Optional[str]:
+    """Phase 0：用已調好的 RAG grounding prompt 重新生成最終答案。
+
+    把 ReAct 過程蒐集到的 rag_search 命中段落（含 title/page）+ KG 關聯整理成
+    編號 context，套用「只能依段落、標 [來源]、不可跨來源拼湊」的 RAG 模板再生成一次，
+    讓 Agent 答案具備 RAG 等級的引用與防幻覺紀律。總長度受 num_ctx 預算限制。
+    """
+    budget = ai.effective_rag_budget()
+    contexts: List[Dict[str, Any]] = []
+    used = 0
+    seen: set = set()
+    for ev in rag_evidence:
+        text = (ev.get("snippet") or ev.get("text") or "").strip()
+        if not text:
+            continue
+        key = (ev.get("document_id"), ev.get("page"), text[:80])
+        if key in seen:
+            continue
+        seen.add(key)
+        if used + len(text) > budget:
+            text = text[: max(0, budget - used)]
+        if not text:
+            break
+        contexts.append({
+            "source_num": len(contexts) + 1,
+            "title": ev.get("title") or "",
+            "page": ev.get("page"),
+            "page_gap": None,
+            "text": text,
+        })
+        used += len(text)
+        if used >= budget:
+            break
+
+    # 把 KG / spec 關聯當作額外一個來源塊（若還有預算）
+    if kg_notes and used < budget:
+        note_text = ("關聯資訊（知識圖譜）:\n" + "\n".join(kg_notes))[: max(0, budget - used)]
+        if note_text.strip():
+            contexts.append({
+                "source_num": len(contexts) + 1,
+                "title": "知識圖譜關聯",
+                "page": None,
+                "page_gap": None,
+                "text": note_text,
+            })
+
+    if not contexts:
+        return None
+
+    prompts = SystemConfigService(db).get_rag_prompts()
+    return ai.generate_rag_answer(
+        question,
+        contexts,
+        conversation_history=conversation_history,
+        system_prompt=prompts["system_prompt"],
+        user_template=prompts["user_template"],
+    )
+
+
 def run_agent(
     db: Session,
     question: str,
@@ -117,6 +184,9 @@ def run_agent(
     history_messages = _build_history_messages(conversation_history or [])
 
     final_text: Optional[str] = None
+    # Phase 0：蒐集證據供最後 grounded 合成（rag_search 命中段落 + KG/spec 關聯）
+    rag_evidence: List[Dict[str, Any]] = []
+    kg_notes: List[str] = []
 
     for step in range(1, max_steps + 1):
         messages: List[Dict[str, Any]] = [
@@ -189,6 +259,16 @@ def run_agent(
         observation = agent_tools.run_tool(db, action, action_input)
         yield {"type": "observation", "step": step, "tool": action, "output": observation}
 
+        # Phase 0：累積證據供最後 grounded 合成
+        if isinstance(observation, dict):
+            if action == "rag_search":
+                for res in observation.get("results", []):
+                    if isinstance(res, dict):
+                        rag_evidence.append(res)
+            elif action in ("spec_references", "spec_supersedes_chain", "spec_lookup", "document_get"):
+                if "error" not in observation:
+                    kg_notes.append(f"{action} → " + json.dumps(observation, ensure_ascii=False)[:900])
+
         # Append to scratchpad so the LLM sees its previous tool call + result
         scratchpad.append({
             "role": "assistant",
@@ -204,5 +284,15 @@ def run_agent(
 
     if final_text is None:
         final_text = "已達最大步數，未能整合出最終答案。建議縮小問題範圍後重試。"
+
+    # Phase 0：若過程有檢索/KG 證據，最後用 RAG grounding prompt 重新合成帶引用的答案。
+    # 合成失敗或無證據時，退回 ReAct 自己的 final_answer。
+    if rag_evidence or kg_notes:
+        try:
+            grounded = _grounded_synthesis(db, question, rag_evidence, kg_notes, conversation_history)
+            if grounded and grounded.strip():
+                final_text = grounded.strip()
+        except Exception as e:
+            logger.warning("grounded synthesis failed, using raw final_answer: %s", e)
 
     yield {"type": "final", "text": final_text}

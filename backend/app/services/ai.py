@@ -12,6 +12,19 @@ from .ollama_client import get_client
 logger = logging.getLogger(__name__)
 
 
+def effective_rag_budget() -> int:
+    """依實際 OLLAMA_NUM_CTX 動態夾限 RAG context 字數預算。
+
+    input+output 共用同一 context window；此函式回傳「可給 context 的字數上限」，
+    並保留 RAG_OUTPUT_RESERVE_CHARS 給生成，避免 prompt 把視窗塞滿導致模型吐空。
+    （本語料 CJK 為主，約 1 token/字，故直接用 num_ctx 當字數上限的近似。）
+    """
+    nctx = getattr(settings, "OLLAMA_NUM_CTX", None) or 4096
+    reserve = getattr(settings, "RAG_OUTPUT_RESERVE_CHARS", 1800)
+    cap = getattr(settings, "RAG_CONTEXT_BUDGET_CHARS", 6000)
+    return max(1500, min(cap, nctx - reserve))
+
+
 DOCUMENT_SUGGESTION_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "properties": {
