@@ -102,16 +102,19 @@ def _grounded_synthesis(
     rag_evidence: List[Dict[str, Any]],
     kg_notes: List[str],
     conversation_history: Optional[List[Dict[str, Any]]],
-) -> Optional[str]:
+) -> tuple:
     """Phase 0：用已調好的 RAG grounding prompt 重新生成最終答案。
+
+    回傳 (answer, n_rag_used, n_rag_total_unique)，後兩者供 Phase 3 完整度反問使用。
 
     把 ReAct 過程蒐集到的 rag_search 命中段落（含 title/page）+ KG 關聯整理成
     編號 context，套用「只能依段落、標 [來源]、不可跨來源拼湊」的 RAG 模板再生成一次，
     讓 Agent 答案具備 RAG 等級的引用與防幻覺紀律。總長度受 num_ctx 預算限制。
     """
     budget = ai.effective_rag_budget()
-    contexts: List[Dict[str, Any]] = []
-    used = 0
+
+    # 先去重，算出「實際有幾筆不重複的檢索證據」(total_unique)，供 Phase 3 完整度判斷
+    deduped: List[tuple] = []
     seen: set = set()
     for ev in rag_evidence:
         text = (ev.get("snippet") or ev.get("text") or "").strip()
@@ -121,6 +124,13 @@ def _grounded_synthesis(
         if key in seen:
             continue
         seen.add(key)
+        deduped.append((ev, text))
+    total_unique = len(deduped)
+
+    # 在預算內塞入 context；裝不下的就是「檢索到但未展開」的來源
+    contexts: List[Dict[str, Any]] = []
+    used = 0
+    for ev, text in deduped:
         if used + len(text) > budget:
             text = text[: max(0, budget - used)]
         if not text:
@@ -135,6 +145,7 @@ def _grounded_synthesis(
         used += len(text)
         if used >= budget:
             break
+    n_rag_used = len(contexts)
 
     # 把 KG / spec 關聯當作額外一個來源塊（若還有預算）
     if kg_notes and used < budget:
@@ -149,16 +160,32 @@ def _grounded_synthesis(
             })
 
     if not contexts:
-        return None
+        return None, 0, total_unique
 
     prompts = SystemConfigService(db).get_rag_prompts()
-    return ai.generate_rag_answer(
+    answer = ai.generate_rag_answer(
         question,
         contexts,
         conversation_history=conversation_history,
         system_prompt=prompts["system_prompt"],
         user_template=prompts["user_template"],
     )
+    return answer, n_rag_used, total_unique
+
+
+def _coverage_note(n_unused_sources: int, kg_edges_seen: int) -> str:
+    """Phase 3：依啟發式產生「還有更多、要不要深掘」的反問（不額外呼叫 LLM）。
+
+    只在「確實還有未展開的檢索來源或圖譜關聯」時才附加，避免每次都問。
+    """
+    bits: List[str] = []
+    if n_unused_sources > 0:
+        bits.append(f"另有約 {n_unused_sources} 段相關內容因長度限制未在本次展開")
+    if kg_edges_seen > 0:
+        bits.append(f"知識圖譜中已找到 {kg_edges_seen} 條規範關聯，可再往上追引用鏈／版本鏈")
+    if not bits:
+        return ""
+    return "\n\n---\n📌 " + "；".join(bits) + "。需要我針對哪一項深入查嗎？"
 
 
 def run_agent(
@@ -187,6 +214,7 @@ def run_agent(
     # Phase 0：蒐集證據供最後 grounded 合成（rag_search 命中段落 + KG/spec 關聯）
     rag_evidence: List[Dict[str, Any]] = []
     kg_notes: List[str] = []
+    kg_edges_seen = 0  # Phase 3：圖譜關聯數，供完整度反問
 
     for step in range(1, max_steps + 1):
         messages: List[Dict[str, Any]] = [
@@ -268,6 +296,8 @@ def run_agent(
             elif action in ("spec_references", "spec_supersedes_chain", "spec_lookup", "document_get"):
                 if "error" not in observation:
                     kg_notes.append(f"{action} → " + json.dumps(observation, ensure_ascii=False)[:900])
+                    if action == "spec_references":
+                        kg_edges_seen += len(observation.get("outgoing", [])) + len(observation.get("incoming", []))
 
         # Append to scratchpad so the LLM sees its previous tool call + result
         scratchpad.append({
@@ -287,11 +317,17 @@ def run_agent(
 
     # Phase 0：若過程有檢索/KG 證據，最後用 RAG grounding prompt 重新合成帶引用的答案。
     # 合成失敗或無證據時，退回 ReAct 自己的 final_answer。
+    # Phase 3：合成後依啟發式判斷「還有沒有未展開的來源/關聯」，有的話在答案末尾反問。
     if rag_evidence or kg_notes:
         try:
-            grounded = _grounded_synthesis(db, question, rag_evidence, kg_notes, conversation_history)
+            grounded, n_used, n_total = _grounded_synthesis(
+                db, question, rag_evidence, kg_notes, conversation_history
+            )
             if grounded and grounded.strip():
                 final_text = grounded.strip()
+                note = _coverage_note(max(0, n_total - n_used), kg_edges_seen)
+                if note:
+                    final_text += note
         except Exception as e:
             logger.warning("grounded synthesis failed, using raw final_answer: %s", e)
 
