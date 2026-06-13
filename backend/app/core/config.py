@@ -80,6 +80,15 @@ class Settings(BaseSettings):
     KG_AUTO_EXTRACT: bool = True               # 文件 ingest 完成後自動跑 KG 抽取
     KG_MIN_CONFIDENCE: float = 0.3             # 低於此值的 LLM relation 不寫入
 
+    # RAG「小找大」：命中小塊後，連同同文件前後 N 塊一起餵給 LLM，
+    # 避免句子被切塊邊界截斷（搜尋精度用小塊、上下文完整性用擴展後的大塊）。
+    RAG_NEIGHBOR_RADIUS: int = 1               # 0 = 關閉擴展；1 = 帶 k-1/k+1
+    RAG_EXPAND_MAX_CHARS: int = 2000           # 單一來源擴展後的字數上限
+    # 所有來源餵入 LLM 的總字數上限，避免超過模型 context window（num_ctx）導致
+    # prompt 被從頭截斷、模型遺失問題與指令。超出後不再擴展、改用原始小塊。
+    # 注意：須與 OLLAMA_NUM_CTX 搭配——input+output 共用同一視窗，這裡要留生成空間。
+    RAG_CONTEXT_BUDGET_CHARS: int = 6000
+
 
 
     @field_validator("OLLAMA_KEEP_ALIVE", mode="before")

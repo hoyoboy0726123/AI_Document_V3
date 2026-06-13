@@ -28,6 +28,60 @@ def _project_matches(metadata: Dict[str, object], project_id: str) -> bool:
     return value == project_id
 
 
+def _join_dedup(a: str, b: str, max_overlap: int = 400) -> str:
+    """串接 a+b，並裁掉 a 結尾與 b 開頭重複的部分（相鄰塊本來就有 overlap）。"""
+    if not a:
+        return b
+    if not b:
+        return a
+    limit = min(len(a), len(b), max_overlap)
+    for k in range(limit, 20, -1):
+        if a[-k:] == b[:k]:
+            return a + b[k:]
+    return a + "\n" + b
+
+
+def _expand_chunk_text(db: Session, chunk, *, radius: int, max_chars: int) -> str:
+    """小找大：回傳「命中塊 + 同文件前後 radius 塊」合併去重後的完整上下文。
+
+    搜尋精度仍用小塊（向量比對的是命中塊），但餵給 LLM 的是補上鄰塊的大塊，
+    避免句子/數值被切塊邊界截斷（如「允收標準：」與「1.5G RMS」被切成兩塊）。
+    """
+    base = chunk.text or ""
+    if radius <= 0:
+        return base
+    rows = (
+        db.query(models.DocumentChunk)
+        .filter(
+            models.DocumentChunk.document_id == chunk.document_id,
+            models.DocumentChunk.chunk_index >= chunk.chunk_index - radius,
+            models.DocumentChunk.chunk_index <= chunk.chunk_index + radius,
+        )
+        .order_by(models.DocumentChunk.chunk_index)
+        .all()
+    )
+    if len(rows) <= 1:
+        return base
+    merged = ""
+    for r in rows:
+        merged = _join_dedup(merged, r.text or "")
+        if len(merged) >= max_chars:
+            break
+    return merged[:max_chars]
+
+
+def _context_text_budgeted(db: Session, chunk, ctx_used: int) -> str:
+    """在「總 context 預算」內做鄰塊擴展；預算用完就退回原始小塊，避免超過 num_ctx。"""
+    base = chunk.text or ""
+    radius = getattr(settings, "RAG_NEIGHBOR_RADIUS", 1)
+    per_cap = getattr(settings, "RAG_EXPAND_MAX_CHARS", 2800)
+    total_budget = getattr(settings, "RAG_CONTEXT_BUDGET_CHARS", 11000)
+    remaining = total_budget - ctx_used
+    if radius <= 0 or remaining <= len(base):
+        return base
+    return _expand_chunk_text(db, chunk, radius=radius, max_chars=min(per_cap, remaining))
+
+
 @router.post("/query", response_model=schemas.RAGQueryResponse)
 def query_rag(
     payload: schemas.RAGQueryRequest,
@@ -128,6 +182,7 @@ def query_rag(
 
     contexts: List[Dict[str, str]] = []
     sources: List[schemas.DocumentChunkSource] = []
+    ctx_used = 0
     for chunk, score in filtered:
         doc = chunk.document
         chunk_page = chunk.page or 0
@@ -148,12 +203,14 @@ def query_rag(
             # 加入 sources 讓前端顯示，但不傳入 LLM context
             continue
 
+        text = _context_text_budgeted(db, chunk, ctx_used)
+        ctx_used += len(text)
         contexts.append({
             "source_num": source_num,
             "title": doc.title,
             "page": chunk_page,
             "page_gap": page_gap,
-            "text": chunk.text,
+            "text": text,
         })
 
     final_question = optimized_query or question
@@ -272,6 +329,7 @@ def query_stream(
 
     contexts: List[Dict[str, str]] = []
     sources: List[schemas.DocumentChunkSource] = []
+    ctx_used = 0
     for chunk, score in filtered:
         doc = chunk.document
         chunk_page = chunk.page or 0
@@ -284,7 +342,12 @@ def query_stream(
         if chunk.document_id == primary_doc_id and primary_page and chunk.page:
             if abs(chunk.page - primary_page) > PAGE_GAP_FILTER:
                 continue
-        contexts.append({"source_num": source_num, "title": doc.title, "page": chunk_page, "page_gap": page_gap, "text": chunk.text})
+        text = _context_text_budgeted(db, chunk, ctx_used)
+        ctx_used += len(text)
+        contexts.append({
+            "source_num": source_num, "title": doc.title, "page": chunk_page, "page_gap": page_gap,
+            "text": text,
+        })
 
     final_question = optimized_query or question
     history = (
