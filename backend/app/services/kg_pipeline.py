@@ -125,6 +125,46 @@ def extract_kg_from_document(db: Session, document: models.Document, task: Optio
 
     db.flush()
 
+    # ── Structural pass (deterministic, NO LLM): 通用 schema 的 Document / Section
+    #    + contains / part_of / references。doc-type 無關，領域差異走 meta.kind。
+    from . import kg_structure
+
+    structural_edges = 0
+    doc_canon = f"doc:{document.id}"
+    doc_ent = kg_service.upsert_entity(
+        db, canonical_id=doc_canon, type_="document",
+        name=document.title or doc_canon, meta={"document_id": document.id},
+    )
+    sections, doc_level_specs = kg_structure.extract_structure(chunks)
+    section_ent: dict = {}
+    for number, sec in sections.items():
+        ent = kg_service.upsert_entity(
+            db, canonical_id=f"{doc_canon}#{number}", type_="section", name=sec.title,
+            meta={"kind": sec.kind, "number": number, "page": sec.page, "document_id": document.id},
+        )
+        section_ent[number] = ent
+        if kg_service.upsert_relation(db, src_id=doc_ent.id, dst_id=ent.id, rel_type="contains",
+                                      document_id=document.id, confidence=1.0):
+            structural_edges += 1
+    for number, ent in section_ent.items():
+        parent = kg_structure._parent_number(number)
+        if parent and parent in section_ent:
+            if kg_service.upsert_relation(db, src_id=ent.id, dst_id=section_ent[parent].id,
+                                          rel_type="part_of", document_id=document.id, confidence=1.0):
+                structural_edges += 1
+    for number, sec in sections.items():
+        for sp in sec.specs:
+            sp_ent = canonical_to_entity.get(sp)
+            if sp_ent and kg_service.upsert_relation(db, src_id=section_ent[number].id, dst_id=sp_ent.id,
+                                                     rel_type="references", document_id=document.id, confidence=1.0):
+                structural_edges += 1
+    for sp in doc_level_specs:
+        sp_ent = canonical_to_entity.get(sp)
+        if sp_ent and kg_service.upsert_relation(db, src_id=doc_ent.id, dst_id=sp_ent.id,
+                                                 rel_type="references", document_id=document.id, confidence=1.0):
+            structural_edges += 1
+    db.commit()
+
     # Second pass: relation classification per chunk
     llm = get_llm_provider()
 
@@ -195,8 +235,10 @@ def extract_kg_from_document(db: Session, document: models.Document, task: Optio
     db.commit()
 
     return {
-        "entities": len(canonical_to_entity),
-        "relations": relations_added,
+        "entities": len(canonical_to_entity) + 1 + len(section_ent),  # specs + document + sections
+        "relations": relations_added + structural_edges,
+        "structural_relations": structural_edges,
+        "sections": len(section_ent),
         "chunks_processed": processed,
         "llm_calls": llm_calls,
     }

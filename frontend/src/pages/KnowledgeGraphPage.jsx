@@ -23,6 +23,10 @@ const { Text } = Typography;
 
 // Distinct color per spec family
 const TYPE_COLORS = {
+  // 通用結構節點
+  document: "#000000",
+  section: "#8c8c8c",
+  // 規範家族
   ISO: "#1677ff",
   IEC: "#13c2c2",
   MIL_STD: "#fa541c",
@@ -39,6 +43,10 @@ const TYPE_COLORS = {
 };
 
 const REL_COLORS = {
+  // 通用結構關係
+  contains: "#bfbfbf",
+  part_of: "#d9d9d9",
+  // 語意關係
   references: "#1677ff",
   supersedes: "#fa541c",
   defines: "#52c41a",
@@ -47,6 +55,8 @@ const REL_COLORS = {
 };
 
 const REL_LABELS = {
+  contains: "包含",
+  part_of: "屬於",
   references: "引用",
   supersedes: "取代",
   defines: "定義",

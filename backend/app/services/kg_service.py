@@ -22,18 +22,27 @@ def upsert_entity(
     type_: str,
     name: Optional[str] = None,
     description: Optional[str] = None,
+    meta: Optional[dict] = None,
 ) -> models.KGEntity:
-    """Get-or-create a single entity by canonical_id. Caller commits."""
+    """Get-or-create a single entity by canonical_id. Caller commits.
+
+    `meta` 存通用屬性（如 Section 的 kind / number / page），讓領域差異走屬性而非新增型別。
+    """
     row = db.query(models.KGEntity).filter_by(canonical_id=canonical_id).first()
     if row:
         if description and not row.description:
             row.description = description
+        if meta:
+            merged = dict(row.meta or {})
+            merged.update(meta)
+            row.meta = merged
         return row
     row = models.KGEntity(
         canonical_id=canonical_id,
         type=type_,
         name=name or canonical_id,
         description=description,
+        meta=meta or {},
     )
     db.add(row)
     db.flush()
