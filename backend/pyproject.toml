@@ -24,8 +24,19 @@ dependencies = [
   "pymupdf",
   "Pillow",
   "slowapi",
-  "paddleocr",
-  "paddlepaddle",
+  # PaddleOCR / PaddlePaddle 版本鎖：
+  # paddlepaddle 3.3.x 在 Windows CPU 上 PIR + onednn 新執行器有 regression
+  # (ConvertPirAttribute2RuntimeAttribute not support [pir::ArrayAttribute<...>])，
+  # 導致 PPStructureV3 layout 模型 predict 失敗。
+  # 上游未修：https://github.com/PaddlePaddle/Paddle/issues/77340
+  # 社群實測可用組合：paddlepaddle 3.2.2 + paddleocr 3.4.1
+  "paddleocr==3.4.1",
+  "paddlepaddle==3.2.2",
+  # PPStructureV3 需要 paddlex[ocr] 的 extras (lxml / beautifulsoup4 / openpyxl /
+  # scikit-learn / scipy / sentencepiece / tiktoken / einops 等)，否則 build pipeline
+  # 會丟 DependencyError。
+  "paddlex[ocr]==3.4.3",
+  "google-generativeai",
 ]
 
 [tool.uv]

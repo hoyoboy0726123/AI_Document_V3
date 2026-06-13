@@ -293,10 +293,18 @@ def create_document(
             is_image_based=False,
             original_filename=payload.original_filename,
             force_vision=False,
+            force_ocr=False,
         )
 
-        task_type = "vl_vectorize" if payload.force_vision else "vectorize"
-        task_msg = "等待 VL 解析開始..." if payload.force_vision else "等待向量化開始..."
+        if payload.force_ocr:
+            task_type = "ocr_vectorize"
+            task_msg = "等待 PaddleOCR 開始..."
+        elif payload.force_vision:
+            task_type = "vl_vectorize"
+            task_msg = "等待 VL 解析開始..."
+        else:
+            task_type = "vectorize"
+            task_msg = "等待向量化開始..."
 
         bg_task = models.BackgroundTask(
             task_type=task_type,
@@ -310,14 +318,17 @@ def create_document(
         db.commit()
         db.refresh(bg_task)
 
+        # force_ocr/force_vision 都不可重用前端傳來的 pdfminer segments
+        skip_segments = payload.force_vision or payload.force_ocr
         background_tasks.add_task(
             run_document_finalize_task,
             task_id=bg_task.id,
             document_id=document.id,
             pdf_temp_path=payload.source_pdf_path,
             force_vision=payload.force_vision,
-            segments_json=_json.dumps(payload.segments) if payload.segments and not payload.force_vision else None,
+            segments_json=_json.dumps(payload.segments) if payload.segments and not skip_segments else None,
             original_filename=payload.original_filename,
+            force_ocr=payload.force_ocr,
         )
 
         logger.info(f"背景任務已啟動：type={task_type}，task_id={bg_task.id}，document_id={document.id}")
@@ -339,6 +350,7 @@ def create_document(
         is_image_based=payload.is_image_based,
         original_filename=payload.original_filename,
         force_vision=False,
+        force_ocr=False,
     )
 
     logger.info(f"文件創建成功：ID={document.id}，ocr_status={document.ocr_status}")

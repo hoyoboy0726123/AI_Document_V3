@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, Card, Descriptions, Select, Space, Spin, Tag, message, Modal, Input, Tabs, Table, Typography, Statistic, Row, Col, Tooltip, Badge, Popconfirm, Slider } from "antd";
 import { FilePdfOutlined, ExclamationCircleOutlined, EditOutlined, DeleteOutlined, BookOutlined, PlusOutlined, MinusOutlined, DatabaseOutlined, ReloadOutlined, MergeCellsOutlined, ScissorOutlined, TagOutlined } from "@ant-design/icons";
 import ReactMarkdown from "react-markdown";
@@ -160,6 +160,7 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
 
   useEffect(() => {
     fetchDocument();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [documentId]);
 
   // 如果有初始頁面參數（來自搜尋結果），自動開啟 PDF 預覽
@@ -350,12 +351,6 @@ const DocumentDetail = ({ documentId, initialPage, initialHighlightKeyword, onBa
     } finally {
       setPrefixSaving(false);
     }
-  };
-
-  const scoreColor = (score) => {
-    if (score >= 0.8) return "#52c41a";
-    if (score >= 0.5) return "#faad14";
-    return "#ff4d4f";
   };
 
   const metadataEntries = document ? Object.entries(document.metadata ?? {}) : [];

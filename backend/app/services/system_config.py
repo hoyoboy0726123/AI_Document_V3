@@ -162,6 +162,49 @@ class SystemConfigService:
                 self.db.delete(row)
         self.db.commit()
 
+    # ── LLM Provider ──
+
+    LLM_CONFIG_KEYS = (
+        "llm.provider",
+        "llm.model",
+        "embedding.provider",
+        "embedding.model",
+        "vision.provider",
+        "vision.model",
+        "gemini.api_key",
+    )
+
+    def get_llm_provider_config(self) -> Dict[str, Any]:
+        """Read provider config from DB (if any); caller merges with settings defaults."""
+        out: Dict[str, Any] = {}
+        for key in self.LLM_CONFIG_KEYS:
+            v = self.get_config(key)
+            if v is not None:
+                out[key] = v
+        return out
+
+    def update_llm_provider_config(self, payload: Dict[str, Any]) -> None:
+        """Update LLM/embedding provider keys. Only writes keys present in payload."""
+        for key, desc in (
+            ("llm.provider", "LLM 後端 (ollama|gemini)"),
+            ("llm.model", "LLM 模型 ID"),
+            ("embedding.provider", "Embedding 後端"),
+            ("embedding.model", "Embedding 模型 ID"),
+            ("vision.provider", "VL 後端 (目前僅 ollama)"),
+            ("vision.model", "VL 模型 ID"),
+            ("gemini.api_key", "Google Gemini API key"),
+        ):
+            if key in payload:
+                value = payload[key]
+                if value is None or (isinstance(value, str) and value.strip() == ""):
+                    # Delete row (revert to .env default)
+                    row = self.db.query(models.SystemConfig).filter(models.SystemConfig.key == key).first()
+                    if row:
+                        self.db.delete(row)
+                else:
+                    self.set_config(key, value, desc)
+        self.db.commit()
+
     def get_all_configs(self) -> Dict[str, Any]:
         """獲取所有配置"""
         configs = self.db.query(models.SystemConfig).all()

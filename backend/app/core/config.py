@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -62,7 +62,46 @@ class Settings(BaseSettings):
     # PDF 多頁 VL 分析上限（受模型 context window 限制）
     MAX_PDF_ANALYSIS_PAGES: int = 10
 
+    # LLM provider 抽象：可獨立切換 LLM 與 embedding 的後端
+    LLM_PROVIDER: str = "ollama"               # ollama | gemini
+    LLM_MODEL: str | None = None               # 覆寫 OLLAMA_LLM_MODEL；空則用 provider 預設
+    EMBEDDING_PROVIDER: str = "ollama"
+    EMBEDDING_MODEL: str | None = None
+    # VL 視覺模型(目前只支援 ollama;Gemini vision 走 LLM_PROVIDER 那條)
+    VISION_PROVIDER: str = "ollama"
+    VISION_MODEL: str | None = None            # 覆寫 OLLAMA_VISION_MODEL;留空則沿用
 
+    # Gemini / Google AI Studio
+    GEMINI_API_KEY: str | None = None
+    GEMINI_LLM_MODEL: str = "gemini-2.5-flash"
+    GEMINI_EMBED_MODEL: str = "text-embedding-004"
+
+    # KG 抽取
+    KG_AUTO_EXTRACT: bool = True               # 文件 ingest 完成後自動跑 KG 抽取
+    KG_MIN_CONFIDENCE: float = 0.3             # 低於此值的 LLM relation 不寫入
+
+
+
+    @field_validator("OLLAMA_KEEP_ALIVE", mode="before")
+    @classmethod
+    def _normalize_keep_alive(cls, v):
+        # Ollama daemon 接受純數字（"-1" = 永久），但 Ollama API 要求帶單位（如 "5m"）。
+        # 系統環境常為 daemon 設 OLLAMA_KEEP_ALIVE=-1，會被 pydantic-settings 一起讀進來。
+        # 這裡若拿到純數字 / 負數，補上秒單位避免送 API 時 400。
+        if v is None:
+            return v
+        s = str(v).strip()
+        if not s:
+            return s
+        # 已帶單位（s/m/h）就直接用
+        if s[-1].lower() in {"s", "m", "h"}:
+            return s
+        # 純數字（含負號）→ 補 's'
+        try:
+            int(s)
+            return f"{s}s"
+        except ValueError:
+            return s
 
     class Config:
         env_file = ".env"

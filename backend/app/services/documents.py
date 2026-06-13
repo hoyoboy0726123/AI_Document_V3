@@ -99,6 +99,7 @@ class DocumentService:
         is_image_based: bool = False,
         original_filename: Optional[str] = None,
         force_vision: bool = False,
+        force_ocr: bool = False,
     ) -> models.Document:
         document = models.Document(
             title=title,
@@ -107,7 +108,7 @@ class DocumentService:
             created_at=datetime.utcnow(),
             ai_summary=ai_summary,
             is_image_based=is_image_based,
-            ocr_status="not_needed" if not is_image_based else "pending",
+            ocr_status="pending" if (is_image_based or force_ocr) else "not_needed",
         )
         document.metadata_data = metadata or {}
         if classification is not None:
@@ -117,7 +118,14 @@ class DocumentService:
         self.db.refresh(document, attribute_names=["classification"])
 
         if pdf_temp_path:
-            self._finalize_pdf_and_index(document, pdf_temp_path, segments=segments, original_filename=original_filename, force_vision=force_vision)
+            self._finalize_pdf_and_index(
+                document,
+                pdf_temp_path,
+                segments=segments,
+                original_filename=original_filename,
+                force_vision=force_vision,
+                force_ocr=force_ocr,
+            )
 
         return document
 
@@ -280,9 +288,10 @@ class DocumentService:
         segments: Optional[List[Dict[str, Any]]] = None,
         original_filename: Optional[str] = None,
         force_vision: bool = False,
+        force_ocr: bool = False,
     ) -> None:
         temp_path = self._resolve_temp_pdf(pdf_temp_path)
-        
+
         # Construct final filename: [ID]_[OriginalName] or [ID].pdf
         if original_filename:
             # Sanitize filename
@@ -292,14 +301,20 @@ class DocumentService:
                 final_name += ".pdf"
         else:
             final_name = f"{document.id}.pdf"
-            
+
         final_path = self._pdf_storage / final_name
         final_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(temp_path), final_path)
         document.pdf_path = str(final_path)
         self.db.commit()
 
-        self._rebuild_document_chunks(document, final_path, segments=segments, force_vision=force_vision)
+        self._rebuild_document_chunks(
+            document,
+            final_path,
+            segments=segments,
+            force_vision=force_vision,
+            force_ocr=force_ocr,
+        )
 
     def _rebuild_document_chunks(
         self,
@@ -307,6 +322,7 @@ class DocumentService:
         pdf_path: Path,
         segments: Optional[List[Dict[str, Any]]] = None,
         force_vision: bool = False,
+        force_ocr: bool = False,
     ) -> None:
         existing_chunks = (
             self.db.query(models.DocumentChunk)
@@ -319,10 +335,14 @@ class DocumentService:
             self.db.query(models.DocumentChunk).filter(models.DocumentChunk.document_id == document.id).delete()
             self.db.commit()
 
+        # 強制 OCR 時即使是文字型 PDF 也走 PaddleOCR；忽略前端傳來的 segments
+        if force_ocr:
+            segments = None
+
         # 如果已經有 segments，就不需要重複提取
         text = None
         if segments is None:
-            if document.is_image_based:
+            if document.is_image_based or force_ocr:
                 document.ocr_status = "processing"
                 document.ocr_method = "paddleocr"
                 self.db.commit()
@@ -353,7 +373,9 @@ class DocumentService:
                 self.db.commit()
                 total_pages = get_pdf_page_count(str(pdf_path))
                 page_numbers = list(range(1, total_pages + 1))
-                image_bytes_list = pdf_pages_to_images(str(pdf_path), page_numbers, dpi=100, max_dimension=1024)
+                # max_dimension=768 keeps image tokens well under Ollama's 4096 ctx —
+                # avoids qwen2.5vl GGML_ASSERT bug in Ollama 0.13.x+ when tokens overflow ctx.
+                image_bytes_list = pdf_pages_to_images(str(pdf_path), page_numbers, dpi=80, max_dimension=768)
                 segments = ai.extract_text_with_vision(image_bytes_list, page_numbers)
                 text = "\n\n".join(s.get("text", "") for s in segments if s.get("text"))
                 if document.content is None or not document.content.strip():
@@ -480,11 +502,12 @@ def run_document_finalize_task(
     force_vision: bool,
     segments_json: Optional[str],
     original_filename: Optional[str],
+    force_ocr: bool = False,
 ) -> None:
     """
     供 FastAPI BackgroundTasks 呼叫：移動 PDF 並建立向量索引。
     使用獨立 DB Session，不依賴請求生命週期。
-    force_vision=True 時改用 VL 視覺模型解析。
+    force_vision=True 時改用 VL 視覺模型解析；force_ocr=True 時強制走 PaddleOCR。
     """
     import json as _json
     from ..database import SessionLocal
@@ -498,7 +521,12 @@ def run_document_finalize_task(
             return
 
         task.status = "running"
-        task.message = "正在使用 VL 視覺模型解析..." if force_vision else "正在建立向量索引..."
+        if force_ocr:
+            task.message = "正在使用 PaddleOCR 辨識..."
+        elif force_vision:
+            task.message = "正在使用 VL 視覺模型解析..."
+        else:
+            task.message = "正在建立向量索引..."
         db.commit()
 
         service = DocumentService(db)
@@ -510,12 +538,43 @@ def run_document_finalize_task(
             segments=segments,
             original_filename=original_filename,
             force_vision=force_vision,
+            force_ocr=force_ocr,
         )
 
         task.status = "completed"
         task.progress = 100
-        task.message = "VL 解析與向量化完成" if force_vision else "向量化完成"
+        if force_ocr:
+            task.message = "PaddleOCR 辨識與向量化完成"
+        elif force_vision:
+            task.message = "VL 解析與向量化完成"
+        else:
+            task.message = "向量化完成"
         db.commit()
+
+        # 自動觸發 KG 抽取（settings.KG_AUTO_EXTRACT=True 時）。
+        # 這裡 inline 跑而不是再開背景任務，因為 finalize 本身已在背景執行緒；
+        # 失敗只記 log，不讓主任務變 failed。
+        try:
+            from ..core.config import settings as _settings
+            if getattr(_settings, "KG_AUTO_EXTRACT", True):
+                from . import kg_pipeline as _kg_pipeline
+                kg_task = models.BackgroundTask(
+                    task_type="kg_extract",
+                    status="pending",
+                    progress=0,
+                    message="準備抽取規範引用...",
+                    document_id=document_id,
+                    creator_id=document.creator_id,
+                )
+                db.add(kg_task)
+                db.commit()
+                db.refresh(kg_task)
+                _kg_pipeline.run_kg_extract_task(kg_task.id, document_id)
+        except Exception as kg_exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Auto KG extraction failed for document %s: %s", document_id, kg_exc
+            )
 
     except Exception as exc:
         try:

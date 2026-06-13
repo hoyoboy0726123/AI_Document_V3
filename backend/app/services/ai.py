@@ -422,17 +422,24 @@ def extract_text_with_vision(
         return buf.getvalue()
 
     prompt = (
-        "You are a document digitization assistant. Process this PDF page and output two things IN ORDER:\n\n"
-        "1. IMAGES & DIAGRAMS: For every image, chart, diagram, or figure on the page, write a description inside [IMAGE: ...]. "
-        "Describe what it shows, key elements, labels, arrows, and any text embedded in it. "
-        "Example: [IMAGE: Flowchart showing 3 steps: Input → Process → Output. Step labels in Chinese read '資料輸入', '模型運算', '結果輸出'.]\n\n"
-        "2. TEXT CONTENT: Extract ALL visible text on the page, preserving structure:\n"
-        "   - Keep indentation and hierarchy for lists and sub-items.\n"
-        "   - For tables, preserve row/column relationships. Example:\n"
-        "     項目 | 條件A | 條件B\n"
-        "     數值 | 100   | 200\n"
-        "   - Include ALL text, including captions, labels, footnotes, and headers.\n\n"
-        "Do NOT skip images. Do NOT add commentary outside of the above format."
+        "You are a document digitization assistant. Convert this PDF page into clean GitHub-Flavored Markdown.\n\n"
+        "STRICT OUTPUT RULES — output only Markdown, nothing else:\n\n"
+        "1. HEADINGS — Use `##` for section titles, `###` for sub-sections. Preserve hierarchy as it appears on the page.\n\n"
+        "2. TABLES — MUST use Markdown pipe-table syntax INCLUDING the separator row. Example:\n"
+        "```\n"
+        "| 項目 | 條件A | 條件B |\n"
+        "| --- | --- | --- |\n"
+        "| 數值 | 100 | 200 |\n"
+        "```\n"
+        "   Preserve column count exactly. Empty cells use a space. NEVER flatten tables into prose.\n\n"
+        "3. LISTS — Use `-` for bullets and `1.` `2.` for numbered lists. Indent sub-items with 2 spaces.\n\n"
+        "4. IMAGES & DIAGRAMS — For every image, chart, diagram, flowchart, or figure on the page, insert a description block in this exact form:\n"
+        "   `[IMAGE: <one-paragraph description: what it shows, key elements, labels, arrows, embedded text>]`\n"
+        "   Place the [IMAGE: ...] block where the figure appears in reading order.\n"
+        "   NEVER skip an image. Even a small logo or icon gets a brief [IMAGE: ...] line.\n\n"
+        "5. INLINE FORMATTING — Use `**bold**` for emphasized labels, backticks for codes/IDs (e.g. `MIL-STD-810G`).\n\n"
+        "6. INCLUDE EVERYTHING — All visible text: body, captions, labels, footnotes, headers, page numbers, footers. Preserve original language (do not translate Chinese to English or vice versa).\n\n"
+        "7. NO COMMENTARY — Do NOT preface with 'Here is the markdown' or wrap your output in code fences. Output the Markdown content directly."
     )
 
     for img_bytes, page_num in zip(image_bytes_list, page_numbers):
