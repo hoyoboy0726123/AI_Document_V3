@@ -363,23 +363,33 @@ def _tool_get_subitem_details(db: Session, params: Dict[str, Any]) -> Dict[str, 
                         pos = i
                         break
             if pos >= 0:
-                seg = joined[pos:pos + 1400]
-                # 切到下一個小節標題/頁尾，去掉 Testing Result 表、頁碼、下一個測試項等尾巴雜訊。
+                # 在「完整內文」中找下一個小節標題作為邊界（不是固定小視窗），
+                # 這樣同一小節跨頁的後續內容（如 12.1 spec 的 Operation 部分）也會完整帶出。
+                # 邊界只認「下一個子節標題」(Testing X)，不要把頁尾 Copyright 當邊界——
+                # 因為頁尾會出現在小節中間的換頁處，誤當邊界會把後續(如 Operation 規格)整段切掉。
                 tail = re.search(
                     r"(?:\d+(?:\.\d+){1,2}\s*)?"  # 一併切掉子節前的編號（如 12.1.8）
-                    r"(?:Testing\s+(?:Result|Objective|Specification|Procedure|Location|Criteria|Software|Equipment|Method)"
-                    r"|Copyright\s*\d{4})",
-                    seg[len(phrase):], re.IGNORECASE,
+                    r"Testing\s+(?:Result|Objective|Specification|Procedure|Location|Criteria|Software|Equipment|Method)",
+                    joined[pos + len(phrase):], re.IGNORECASE,
                 )
-                if tail:
-                    seg = seg[: len(phrase) + tail.start()]
-                # 清掉頁尾/頁碼雜訊（也順便把跨頁切斷的內容接回）。
+                end = (pos + len(phrase) + tail.start()) if tail else (pos + 3500)
+                seg = joined[pos:end]
+                # 清掉頁尾/頁碼雜訊（把跨頁切斷的內容接回）。
                 seg = re.sub(r"\s*Copyright\s*\d{4}[^\n]*", " ", seg, flags=re.IGNORECASE)
-                seg = re.sub(r"\s*ASUS NB System[^\n]*", " ", seg, flags=re.IGNORECASE)
+                seg = re.sub(r"\s*ASUS NB System Reliability[^\n]*", " ", seg, flags=re.IGNORECASE)
                 seg = re.sub(r"\s*Page\s*\d+\b", " ", seg, flags=re.IGNORECASE)
-                detail = seg.strip()[:900]
+                # 去除因抽取重複造成的相鄰重複行。
+                seen_lines, deduped = set(), []
+                for ln in seg.splitlines():
+                    key = ln.strip()
+                    if key and key in seen_lines:
+                        continue
+                    if key:
+                        seen_lines.add(key)
+                    deduped.append(ln)
+                detail = "\n".join(deduped).strip()[:2400]
             elif joined:
-                detail = joined[:500].strip()
+                detail = joined[:600].strip()
         items.append({
             "name": c.name, "number": meta.get("number"),
             "page": page, "document_id": doc_id, "detail": detail,
