@@ -87,7 +87,7 @@ class Settings(BaseSettings):
     # 所有來源餵入 LLM 的總字數「上限」(實際還會依 num_ctx 動態夾限，見 effective_rag_budget)。
     # input+output 共用同一 context window，須留生成空間。8192 視窗下 6000 字安全。
     RAG_CONTEXT_BUDGET_CHARS: int = 6000
-    RAG_OUTPUT_RESERVE_CHARS: int = 1800       # 預留給「生成」的視窗額度（夾限時扣除）
+    RAG_OUTPUT_RESERVE_CHARS: int = 3000       # 預留給「生成」的視窗額度（夾限時扣除）；調高以容納多來源長答案
 
 
 
