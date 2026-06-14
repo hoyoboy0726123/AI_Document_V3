@@ -43,6 +43,11 @@ Available tools:
 
 Rules:
 - Output ONE JSON object per turn, nothing else.
+- Stay ANCHORED to the user's original subject. You MAY rephrase a query for better \
+retrieval (drop filler words, extract keywords, add synonyms), but you must NOT switch to a \
+different topic than what was asked. Retrieved snippets are EVIDENCE, not a redirection — if \
+a search surfaces a similarly-named but different item, do not pivot to it. Your final_answer \
+must answer the ORIGINAL question's subject.
 - Use spec_lookup BEFORE spec_references / spec_supersedes_chain to resolve canonical_id.
 - For enumeration / listing questions ("what items/tests does X have", "有哪些", "list all", \
 "子項目", "sub-tests of X"), call list_subitems(name) FIRST. It returns the COMPLETE set from \
