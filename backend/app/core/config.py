@@ -89,6 +89,25 @@ class Settings(BaseSettings):
     RAG_CONTEXT_BUDGET_CHARS: int = 6000
     RAG_OUTPUT_RESERVE_CHARS: int = 3000       # 預留給「生成」的視窗額度（夾限時扣除）；調高以容納多來源長答案
 
+    # 混合檢索（向量 + BM25 關鍵字，用 RRF 融合）。對「靠關鍵字才找得到的分散子項目」recall 大幅提升。
+    # 僅 SQLite 生效（FTS5 trigram）；非 SQLite 自動退回純向量。
+    RAG_HYBRID_SEARCH: bool = True
+    RAG_RRF_K: int = 60                         # RRF 常數，越大越平滑（標準值 60）
+    # 融合後餵進 LLM 的「context 塊數」上限。hybrid recall 高但塊一多就破碎，
+    # 過多分散塊會讓生成退化；超出的命中仍會列在 sources（前端可預覽），只是不進 LLM context。
+    RAG_MAX_CONTEXT_CHUNKS: int = 6
+
+    # 撈寬再精選（rerank）：對融合後的候選池，用一次便宜 LLM 打分，把「真正含規格/判定/程序」
+    # 的乾淨段落排到前面、把修訂紀錄/續頁/目錄等垃圾踢掉，再餵生成。失敗自動退回原順序。
+    RAG_RERANK: bool = True
+    RAG_RERANK_POOL: int = 12                   # 送進 rerank 的候選數（撈寬）
+    RAG_RERANK_MIN_SCORE: int = 3               # LLM 後端：低於此分（0-10）視為不相關，剔除
+    # rerank 後端：cross_encoder（專門模型，CPU，~1-3s，建議）／ llm（用 gemma 打分，慢 ~100s）。
+    # cross_encoder 載入失敗會自動退回 llm。
+    RAG_RERANK_BACKEND: str = "cross_encoder"
+    RAG_RERANK_MODEL: str = "BAAI/bge-reranker-base"  # 多語(含中英)cross-encoder，CPU 可跑
+    RAG_RERANK_CE_MIN_SCORE: float = 0.0        # cross-encoder 分數門檻（logit，>0 偏相關）
+
 
 
     @field_validator("OLLAMA_KEEP_ALIVE", mode="before")

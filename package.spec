@@ -15,6 +15,9 @@ datas = [
 ]
 
 # 2. 隱藏導入 (針對 FastAPI, Uvicorn, SQLAlchemy 等)
+# 註：RAG rerank 的 cross-encoder 需要 torch + sentence-transformers + transformers。
+# 若要在 .exe 內啟用 cross-encoder，需另外 collect_all('sentence_transformers')/
+# ('transformers') 並打包模型權重；否則 rerank 會自動降級為 llm 後端（不會 crash）。
 hiddenimports = [
     'uvicorn.logging', 
     'uvicorn.loops.auto', 
@@ -53,6 +56,8 @@ hiddenimports = [
     'app.services.kg_service',
     'app.services.agent',
     'app.services.agent_tools',
+    'app.services.hybrid_search',
+    'app.services.rerank',
     'app.services.llm_provider',
     'app.services.llm_provider.base',
     'app.services.llm_provider.ollama_provider',

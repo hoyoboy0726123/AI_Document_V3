@@ -12,7 +12,7 @@ from ... import models, schemas
 from ...core.config import settings
 from ...core.security import get_current_user
 from ...database import get_db
-from ...services import ai, pdf_image, vector_store
+from ...services import ai, pdf_image, hybrid_search, rerank
 from ...services.system_config import SystemConfigService
 
 
@@ -105,8 +105,74 @@ def _context_keep_ids(filtered):
 
     near_ids = {c.id for c, _ in filtered if _near(c)}
     if len(near_ids) >= max(2, (len(filtered) + 1) // 2):
-        return near_ids  # 命中集中 → 套用頁距過濾，維持單主題一致性
-    return {c.id for c, _ in filtered}  # 命中分散/主命中離群 → 不過濾，全部納入
+        base = near_ids  # 命中集中 → 套用頁距過濾，維持單主題一致性
+    else:
+        base = {c.id for c, _ in filtered}  # 命中分散/主命中離群 → 不過濾，全部納入
+
+    # 餵進 LLM 的塊數上限：依排序取前 N，避免分散的 hybrid 命中塞爆/破碎 context 導致生成退化。
+    # 超出的塊仍會出現在 sources（前端可預覽），只是不進 LLM。
+    cap = getattr(settings, "RAG_MAX_CONTEXT_CHUNKS", 6)
+    ordered_kept = [c.id for c, _ in filtered if c.id in base][:cap]
+    return set(ordered_kept)
+
+
+def _hybrid_filtered(db, payload, search_query, embedding, vector_config, top_k):
+    """混合檢索（向量 + BM25，RRF 融合）後，套用文件/分類/專案/資料夾過濾，回傳 [(chunk, score)]。
+
+    與舊純向量流程相容：回傳的 tuple 形狀不變，下游 page-gap / context 完全沿用。
+    關鍵差異：keyword-only 命中（向量相似度低於門檻但關鍵字命中）不被向量門檻砍掉，
+    這正是把「靠關鍵字才找得到的分散子項目」撈回來的機制。
+    """
+    candidate_k = top_k * vector_config["search_multiplier"]
+    fused, kw_hits = hybrid_search.fuse(db, search_query, embedding, candidate_k)
+    if not fused:
+        return []
+
+    faiss_ids = [fid for fid, _ in fused]
+    chunk_rows = (
+        db.query(models.DocumentChunk)
+        .join(models.Document, models.DocumentChunk.document_id == models.Document.id)
+        .filter(models.DocumentChunk.faiss_id.in_(faiss_ids))
+        .all()
+    )
+    chunk_map = {c.faiss_id: c for c in chunk_rows}
+    min_sim = vector_config["min_similarity_score"]
+
+    # 撈寬：先收集一個較大的候選池（供 rerank 精選），rerank 關閉時退回只收 top_k。
+    rerank_on = getattr(settings, "RAG_RERANK", True)
+    pool_size = max(top_k, getattr(settings, "RAG_RERANK_POOL", 12)) if rerank_on else top_k
+
+    pool = []
+    seen_pages = set()  # 同頁去重：保留 RRF 最高的那一塊，避免重複頁稀釋 context
+    for fid, vscore in fused:
+        chunk = chunk_map.get(fid)
+        if not chunk:
+            continue
+        # 相關性門檻：向量低分「且非關鍵字命中」才丟棄；keyword-only 命中放行
+        if vscore is not None and vscore < min_sim and fid not in kw_hits:
+            continue
+        doc = chunk.document
+        if payload.document_id and doc.id != payload.document_id:
+            continue
+        if payload.classification_id and doc.classification_id != payload.classification_id:
+            continue
+        if payload.project_id and not _project_matches(doc.metadata_data or {}, payload.project_id):
+            continue
+        if payload.folder_ids and doc.folder_id not in payload.folder_ids:
+            continue
+        page_key = (doc.id, chunk.page)
+        if chunk.page is not None and page_key in seen_pages:
+            continue
+        seen_pages.add(page_key)
+        # 顯示用分數：有向量分用向量分；keyword-only 命中以 0.0 佔位（前端仍可預覽內容）
+        pool.append((chunk, vscore if vscore is not None else 0.0))
+        if len(pool) >= pool_size:
+            break
+
+    if not rerank_on or len(pool) <= 1:
+        return pool[:top_k]
+    # 撈寬再精選：把垃圾頁踢掉、乾淨規格段排前，再取 top_k
+    return rerank.rerank(search_query, pool, top_k)
 
 
 @router.post("/query", response_model=schemas.RAGQueryResponse)
@@ -156,41 +222,9 @@ def query_rag(
     if not embeddings:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="嵌入計算失敗")
 
-    search_results = vector_store.search(
-        embeddings[0], top_k=payload.top_k * vector_config["search_multiplier"]
+    filtered = _hybrid_filtered(
+        db, payload, search_query, embeddings[0], vector_config, payload.top_k
     )
-    if not search_results:
-        return schemas.RAGQueryResponse(answer="目前無可用文件內容", sources=[])
-
-    faiss_ids = [fid for fid, _ in search_results]
-    chunk_rows = (
-        db.query(models.DocumentChunk)
-        .join(models.Document, models.DocumentChunk.document_id == models.Document.id)
-        .filter(models.DocumentChunk.faiss_id.in_(faiss_ids))
-        .all()
-    )
-    chunk_map = {c.faiss_id: c for c in chunk_rows}
-
-    filtered: List[tuple[models.DocumentChunk, float]] = []
-    for fid, score in search_results:
-        if score < vector_config["min_similarity_score"]:
-            continue
-        chunk = chunk_map.get(fid)
-        if not chunk:
-            continue
-        doc = chunk.document
-        if payload.document_id and doc.id != payload.document_id:
-            continue
-        if payload.classification_id and doc.classification_id != payload.classification_id:
-            continue
-        if payload.project_id and not _project_matches(doc.metadata_data or {}, payload.project_id):
-            continue
-        if payload.folder_ids and doc.folder_id not in payload.folder_ids:
-            continue
-        filtered.append((chunk, score))
-        if len(filtered) >= payload.top_k:
-            break
-
     if not filtered:
         return schemas.RAGQueryResponse(answer="找不到符合的內容，請調整關鍵詞或過濾條件", sources=[])
 
@@ -291,47 +325,10 @@ def query_stream(
         return StreamingResponse(_embed_error(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    search_results = vector_store.search(
-        embeddings[0], top_k=(payload.top_k or 5) * vector_config["search_multiplier"]
-    )
-
-    if not search_results:
-        def _no_content():
-            yield f"data: {json.dumps({'type': 'content', 'text': '目前無可用文件內容'}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'sources', 'sources': [], 'is_followup': is_followup, 'optimized_query': optimized_query}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
-        return StreamingResponse(_no_content(), media_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-    faiss_ids = [fid for fid, _ in search_results]
-    chunk_rows = (
-        db.query(models.DocumentChunk)
-        .join(models.Document, models.DocumentChunk.document_id == models.Document.id)
-        .filter(models.DocumentChunk.faiss_id.in_(faiss_ids))
-        .all()
-    )
-    chunk_map = {c.faiss_id: c for c in chunk_rows}
-
     top_k = payload.top_k or 5
-    filtered: List[tuple] = []
-    for fid, score in search_results:
-        if score < vector_config["min_similarity_score"]:
-            continue
-        chunk = chunk_map.get(fid)
-        if not chunk:
-            continue
-        doc = chunk.document
-        if payload.document_id and doc.id != payload.document_id:
-            continue
-        if payload.classification_id and doc.classification_id != payload.classification_id:
-            continue
-        if payload.project_id and not _project_matches(doc.metadata_data or {}, payload.project_id):
-            continue
-        if payload.folder_ids and doc.folder_id not in payload.folder_ids:
-            continue
-        filtered.append((chunk, score))
-        if len(filtered) >= top_k:
-            break
+    filtered = _hybrid_filtered(
+        db, payload, search_query, embeddings[0], vector_config, top_k
+    )
 
     if not filtered:
         def _no_match():
