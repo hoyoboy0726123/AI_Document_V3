@@ -353,13 +353,22 @@ def run_agent(
             chosen = structural_results[0]
         if chosen:
             lines = [f"「{chosen['matched']}」共有 {len(chosen['subitems'])} 個子項目："]
+            enum_sources: List[Dict[str, Any]] = []
             for it in chosen["subitems"]:
                 num = it.get("number")
                 lines.append(f"- {(str(num) + ' ') if num else ''}{it.get('name', '')}")
+                if it.get("document_id"):
+                    enum_sources.append({
+                        "document_id": it.get("document_id"),
+                        "title": it.get("name", ""),
+                        "page": it.get("page"),
+                        "snippet": f"{(str(num) + ' ') if num else ''}{it.get('name', '')}",
+                        "score": None,
+                    })
             if chosen.get("references"):
                 lines.append(f"\n引用標準：{'、'.join(chosen['references'])}")
             lines.append("\n（以上為知識圖譜結構的完整列舉）")
-            yield {"type": "final", "text": "\n".join(lines), "sources": []}
+            yield {"type": "final", "text": "\n".join(lines), "sources": enum_sources}
             return
 
     # Phase 0：若過程有檢索/KG 證據，最後用 RAG grounding prompt 重新合成帶引用的答案。

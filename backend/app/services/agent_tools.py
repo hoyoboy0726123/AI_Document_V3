@@ -234,7 +234,13 @@ def _tool_list_subitems(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
             c = emap.get(cid)
             if c:
                 meta = c.meta or {}
-                subitems.append({"name": c.name, "kind": meta.get("kind") or c.type, "number": meta.get("number")})
+                subitems.append({
+                    "name": c.name,
+                    "kind": meta.get("kind") or c.type,
+                    "number": meta.get("number"),
+                    "page": meta.get("page"),
+                    "document_id": meta.get("document_id"),
+                })
         subitems.sort(key=lambda x: _natural_key(x.get("number")))
 
     # 該節點引用的標準
