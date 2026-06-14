@@ -366,11 +366,17 @@ def _tool_get_subitem_details(db: Session, params: Dict[str, Any]) -> Dict[str, 
                 seg = joined[pos:pos + 1400]
                 # 切到下一個小節標題/頁尾，去掉 Testing Result 表、頁碼、下一個測試項等尾巴雜訊。
                 tail = re.search(
-                    r"(Testing (Result|Objective|Specification|Procedure|Location)|Copyright\s*\d{4})",
+                    r"(?:\d+(?:\.\d+){1,2}\s*)?"  # 一併切掉子節前的編號（如 12.1.8）
+                    r"(?:Testing\s+(?:Result|Objective|Specification|Procedure|Location|Criteria|Software|Equipment|Method)"
+                    r"|Copyright\s*\d{4})",
                     seg[len(phrase):], re.IGNORECASE,
                 )
                 if tail:
                     seg = seg[: len(phrase) + tail.start()]
+                # 清掉頁尾/頁碼雜訊（也順便把跨頁切斷的內容接回）。
+                seg = re.sub(r"\s*Copyright\s*\d{4}[^\n]*", " ", seg, flags=re.IGNORECASE)
+                seg = re.sub(r"\s*ASUS NB System[^\n]*", " ", seg, flags=re.IGNORECASE)
+                seg = re.sub(r"\s*Page\s*\d+\b", " ", seg, flags=re.IGNORECASE)
                 detail = seg.strip()[:900]
             elif joined:
                 detail = joined[:500].strip()
