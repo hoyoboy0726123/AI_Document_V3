@@ -82,6 +82,33 @@ def _context_text_budgeted(db: Session, chunk, ctx_used: int) -> str:
     return _expand_chunk_text(db, chunk, radius=radius, max_chars=min(per_cap, remaining))
 
 
+_PAGE_GAP = 5
+
+
+def _context_keep_ids(filtered):
+    """智慧頁距過濾 + 塌縮保護：回傳應納入 LLM context 的 chunk id 集合。
+
+    原本固定的頁距過濾（離主命中 ±5 頁）在「主命中是離群/索引頁，或命中本來就分散」時，
+    會把 context 塌縮到極少甚至只剩 1 塊（例如最高分命中落在修訂紀錄頁，真正內容頁全被丟掉）。
+    這裡只在「多數命中本來就集中在主命中附近」時才套用；否則（分散/離群）不套用、全部納入。
+    """
+    if not filtered:
+        return set()
+    primary = filtered[0][0]
+    pp = primary.page or 0
+    pid = primary.document_id
+
+    def _near(c):
+        if c.document_id != pid or not pp or not c.page:
+            return True
+        return abs(c.page - pp) <= _PAGE_GAP
+
+    near_ids = {c.id for c, _ in filtered if _near(c)}
+    if len(near_ids) >= max(2, (len(filtered) + 1) // 2):
+        return near_ids  # 命中集中 → 套用頁距過濾，維持單主題一致性
+    return {c.id for c, _ in filtered}  # 命中分散/主命中離群 → 不過濾，全部納入
+
+
 @router.post("/query", response_model=schemas.RAGQueryResponse)
 def query_rag(
     payload: schemas.RAGQueryRequest,
@@ -167,18 +194,9 @@ def query_rag(
     if not filtered:
         return schemas.RAGQueryResponse(answer="找不到符合的內容，請調整關鍵詞或過濾條件", sources=[])
 
-    # 頁碼連續性過濾：同一份文件內，頁距超過閾值的塊直接排除，不傳給 LLM
-    # 跨文件的塊不受此限制（不同文件本來就是獨立來源）
-    PAGE_GAP_FILTER = 5
+    # 頁距過濾（智慧 + 塌縮保護）：命中集中才套用；分散/主命中離群則全納入。
     primary_page = filtered[0][0].page or 0
-    primary_doc_id = filtered[0][0].document_id
-
-    def _should_include(chunk, score) -> bool:
-        if chunk.document_id != primary_doc_id:
-            return True  # 不同文件來源，不過濾
-        if not primary_page or not chunk.page:
-            return True  # 頁碼缺失，無法判斷，保留
-        return abs(chunk.page - primary_page) <= PAGE_GAP_FILTER
+    keep_ids = _context_keep_ids(filtered)
 
     contexts: List[Dict[str, str]] = []
     sources: List[schemas.DocumentChunkSource] = []
@@ -199,7 +217,7 @@ def query_rag(
             )
         )
 
-        if not _should_include(chunk, score):
+        if chunk.id not in keep_ids:
             # 加入 sources 讓前端顯示，但不傳入 LLM context
             continue
 
@@ -323,9 +341,8 @@ def query_stream(
         return StreamingResponse(_no_match(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    PAGE_GAP_FILTER = 5
     primary_page = filtered[0][0].page or 0
-    primary_doc_id = filtered[0][0].document_id
+    keep_ids = _context_keep_ids(filtered)
 
     contexts: List[Dict[str, str]] = []
     sources: List[schemas.DocumentChunkSource] = []
@@ -339,9 +356,8 @@ def query_stream(
             document_id=doc.id, title=doc.title, page=chunk.page,
             snippet=chunk.text, score=score,
         ))
-        if chunk.document_id == primary_doc_id and primary_page and chunk.page:
-            if abs(chunk.page - primary_page) > PAGE_GAP_FILTER:
-                continue
+        if chunk.id not in keep_ids:
+            continue
         text = _context_text_budgeted(db, chunk, ctx_used)
         ctx_used += len(text)
         contexts.append({
