@@ -47,10 +47,17 @@ Rules:
 - For enumeration / listing questions ("what items/tests does X have", "有哪些", "list all", \
 "子項目", "sub-tests of X"), call list_subitems(name) FIRST. It returns the COMPLETE set from \
 the knowledge graph; rag_search alone retrieves only top-k chunks and WILL miss items.
+- For a question ABOUT a whole category/group ("介紹/說明 X", "tell me about the X tests", \
+"these tests", "X 的內容/重點"), or a FOLLOW-UP elaborating on a group, call coverage_check(name) \
+to get EVERY sub-item with content. rag_search ranks by keyword/similarity and WILL miss \
+sub-items whose pages don't contain the keyword (e.g. a 'Surface Deflection' sub-test under \
+'Pressure Test'). If a rag_search for a category looks partial, follow up with coverage_check \
+and merge — the final answer must cover ALL sub-items, not only the ones rag_search surfaced.
 - If a tool returns no relevant info, try another tool or a different query — do NOT \
 hallucinate spec content. If the corpus truly lacks info, say so in final_answer.
-- Stop and emit final_answer as soon as you have enough evidence. Do not call \
-extra tools for completeness; brevity is preferred.
+- Stop and emit final_answer as soon as you have enough evidence. Brevity is preferred for \
+SINGLE-item questions; but for category/group questions completeness wins — make sure every \
+sub-item (per list_subitems / coverage_check) is represented before finishing.
 - Always answer in the user's language (zh-TW if they wrote Chinese; English otherwise).
 - Cite document titles or spec canonical_ids inline when summarizing findings.
 
@@ -211,6 +218,19 @@ def _looks_like_enumeration(q: str) -> bool:
     return bool(_ENUM_RE.search(q or ""))
 
 
+_OVERVIEW_RE = re.compile(
+    r"(介紹|說明|概覽|概述|描述|重點|摘要|整理|內容|overview|brief|describe|summar|"
+    r"tell me about|rundown|walk me through|各[項個種子]|每[項個種]|each\b|"
+    r"all (the )?(tests|items|sub))",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_overview(q: str) -> bool:
+    """判斷是否為『類別/概覽』題（介紹/說明/各項/each…）。實際是否接管仍需 KG 命中有子項的父節點。"""
+    return bool(_OVERVIEW_RE.search(q or ""))
+
+
 _ASPECT_RE = [
     ("criteria", re.compile(r"(判定標準|判定基準|驗收標準|合格標準|測試標準|criteria|criterion)", re.IGNORECASE)),
     ("specification", re.compile(r"(測試規格|規格|測試條件|specification|\bspec\b)", re.IGNORECASE)),
@@ -303,6 +323,27 @@ def _try_structural_answer(db: Session, question: str, conversation_history) -> 
             if summary:
                 body += f"\n\n📝 摘要說明：\n{summary}"
             return {"text": body, "sources": sources}
+
+    # 類別/概覽題（介紹/說明/各項…）→ 用 coverage_check 確定性涵蓋「全部子項 + 各自內容」，
+    # 不依賴 RAG（會漏不含關鍵字的子項）也不依賴 LLM 自選名稱（可能誤命中同名葉節點）。
+    if _looks_like_overview(question):
+        cov = agent_tools.run_tool(db, "coverage_check", {"name": search_text})
+        items = cov.get("items") or []
+        if cov.get("matched") and not cov.get("is_leaf") and len(items) >= 2:
+            lines = [f"「{cov.get('matched')}」共有 {len(items)} 個子項目，逐項內容如下："]
+            sources: List[Dict[str, Any]] = []
+            for it in items:
+                num, nm = it.get("number"), it.get("name")
+                lines.append(f"\n### {(str(num) + ' ') if num else ''}{nm}")
+                ex = (it.get("excerpt") or "").strip()
+                lines.append(ex if ex else "（此項找不到對應段落，建議改用一般 RAG 查詢）")
+                if it.get("document_id"):
+                    sources.append({
+                        "document_id": it["document_id"], "title": nm, "page": it.get("page"),
+                        "snippet": ex[:200], "score": None,
+                    })
+            lines.append("\n（以上為知識圖譜結構的完整覆蓋，已涵蓋全部子項目）")
+            return {"text": "\n".join(lines), "sources": sources}
 
     return None
 

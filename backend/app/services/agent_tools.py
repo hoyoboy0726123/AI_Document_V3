@@ -322,8 +322,19 @@ def _tool_list_subitems(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _resolve_named_structural(db: Session, name: str):
-    """名稱 → 結構節點：先 forward 子字串搜尋，再 reverse-containment（名稱出現在查詢字串內）。"""
+def _has_children(db: Session, ent) -> bool:
+    return bool(
+        db.query(models.KGRelation).filter_by(src_id=ent.id, rel_type="contains").first()
+        or db.query(models.KGRelation).filter_by(dst_id=ent.id, rel_type="part_of").first()
+    )
+
+
+def _resolve_named_structural(db: Session, name: str, prefer_parent: bool = False):
+    """名稱 → 結構節點：先 forward 子字串搜尋，再 reverse-containment（名稱出現在查詢字串內）。
+
+    prefer_parent=True：類別/覆蓋型查詢用 —— 同分時優先選「有子項目的父節點」，
+    避免命中同名葉節點（如 'Pressure for Glass Test' 而非第 12 章 'Pressure Test'）。
+    """
     rows = kg_service.search_entities(db, name, limit=10)
     if not rows:
         ql = name.lower()
@@ -343,6 +354,8 @@ def _resolve_named_structural(db: Session, name: str):
             s += 5
         elif q in nm or nm in q:
             s += 2
+        if prefer_parent and _has_children(db, e):
+            s += 4  # 類別查詢：有子項的父節點優先
         return s
 
     return sorted(rows, key=_score, reverse=True)[0]
@@ -471,6 +484,94 @@ def _tool_get_subitem_details(db: Session, params: Dict[str, Any]) -> Dict[str, 
     return {"matched": ent.name, "aspect": aspect, "items": items, "item_count": len(items), "is_leaf": is_leaf}
 
 
+def _children_of(db: Session, ent) -> List[models.KGEntity]:
+    """回傳某 KG 節點的子項目（contains 正向 + part_of 反向）。"""
+    child_ids = [
+        r.dst_id for r in db.query(models.KGRelation).filter_by(src_id=ent.id, rel_type="contains").all()
+    ] + [
+        r.src_id for r in db.query(models.KGRelation).filter_by(dst_id=ent.id, rel_type="part_of").all()
+    ]
+    return db.query(models.KGEntity).filter(models.KGEntity.id.in_(child_ids)).all() if child_ids else []
+
+
+def _doc_section_pages(db: Session, doc_id: Optional[str]) -> List[int]:
+    """文件內所有 section 的頁碼（排序），用來算每節的「下一節」邊界。"""
+    return sorted({
+        (e.meta or {}).get("page")
+        for e in db.query(models.KGEntity).filter(models.KGEntity.type == "section").all()
+        if (e.meta or {}).get("document_id") == doc_id and (e.meta or {}).get("page")
+    })
+
+
+def _section_text(db: Session, ent, all_pages: List[int], max_chars: int = 800) -> Optional[str]:
+    """抓某節「整節」內容(頁界 = 本頁→下一節頁-1),清掉頁尾雜訊,截斷。與 aspect 無關。"""
+    meta = ent.meta or {}
+    doc_id, page = meta.get("document_id"), meta.get("page")
+    if not (doc_id and page):
+        return None
+    next_page = next((x for x in all_pages if x > page), None)
+    hi = (next_page - 1) if (next_page and next_page > page) else (page + 6)
+    chunks = (
+        db.query(models.DocumentChunk)
+        .filter(
+            models.DocumentChunk.document_id == doc_id,
+            models.DocumentChunk.page >= page,
+            models.DocumentChunk.page <= hi,
+        )
+        .order_by(models.DocumentChunk.page, models.DocumentChunk.chunk_index)
+        .all()
+    )
+    joined = "\n".join(ch.text or "" for ch in chunks)
+    # 對齊到「本節自己的標題」(頁面常以前一節的結尾表格開頭，避免摘錄抓到上一節尾巴)。
+    num, nm = meta.get("number"), ent.name or ""
+    start = 0
+    if num:
+        m = re.search(r"\b" + re.escape(str(num)) + r"\b", joined)
+        if m:
+            start = m.start()
+    if start == 0 and nm:
+        m = re.search(re.escape(nm), joined, re.IGNORECASE)
+        if m:
+            start = m.start()
+    seg = joined[start:]
+    seg = re.sub(r"\s*Copyright\s*\d{4}[^\n]*", " ", seg, flags=re.IGNORECASE)
+    seg = re.sub(r"\s*ASUS NB System Reliability[^\n]*", " ", seg, flags=re.IGNORECASE)
+    seg = re.sub(r"\s*Page\s*\d+\b", " ", seg, flags=re.IGNORECASE)
+    return seg.strip()[:max_chars] or None
+
+
+def _tool_coverage_check(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
+    """完整性交叉檢查：回傳某主題在 KG 結構下的「全部子項目 + 每項內容摘錄」。
+
+    用途:RAG/關鍵字常漏掉不含關鍵字的子項(如 12.4 Surface Deflection)。當問題是
+    「介紹/說明某類測試」或追問「這些測試...」,呼叫此工具可保證涵蓋全部子項，
+    不會因關鍵字漏撈而少答。葉節點(無子項)則回它自己的內容。
+    """
+    name = str(params.get("name") or params.get("query") or params.get("topic") or "").strip()
+    if not name:
+        return {"error": "name is required"}
+    ent = _resolve_named_structural(db, name, prefer_parent=True)
+    if not ent:
+        return {"matched": None, "items": [], "hint": "KG 無對應節點"}
+
+    children = _children_of(db, ent)
+    is_leaf = not children
+    targets = [ent] if is_leaf else children
+    all_pages = _doc_section_pages(db, (ent.meta or {}).get("document_id"))
+
+    items: List[Dict[str, Any]] = []
+    for c in sorted(targets, key=lambda e: ((e.meta or {}).get("page") or 0, _natural_key((e.meta or {}).get("number")))):
+        meta = c.meta or {}
+        items.append({
+            "name": c.name,
+            "number": meta.get("number"),
+            "page": meta.get("page"),
+            "document_id": meta.get("document_id"),
+            "excerpt": _section_text(db, c, all_pages, 800),
+        })
+    return {"matched": ent.name, "item_count": len(items), "is_leaf": is_leaf, "items": items}
+
+
 # ───── Registry ───────────────────────────────────────────────────────────
 
 
@@ -580,6 +681,26 @@ TOOLS: Dict[str, Tool] = {
             "required": ["name"],
         },
         run=_tool_get_subitem_details,
+    ),
+    "coverage_check": Tool(
+        name="coverage_check",
+        description=(
+            "Completeness cross-check. For a topic/category that has sub-items (e.g. a chapter "
+            "of tests), return the COMPLETE set of sub-items from the knowledge graph WITH a "
+            "content excerpt for each. USE THIS whenever the user asks generally about a group/"
+            "category ('介紹 X / 說明這些測試 / tell me about the X tests') or follows up about "
+            "'these tests', AND after a rag_search whose results look partial — keyword/RAG misses "
+            "sub-items that don't contain the keyword (e.g. a 'Surface Deflection' page under "
+            "'Pressure Test'). Guarantees every sub-item is covered so the final answer is complete."
+        ),
+        schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "topic / category / parent name, e.g. 'Pressure Test'"},
+            },
+            "required": ["name"],
+        },
+        run=_tool_coverage_check,
     ),
 }
 
