@@ -35,6 +35,44 @@ class Tool:
 # ───── Tool implementations ────────────────────────────────────────────────
 
 
+def _join_dedup(a: str, b: str, max_overlap: int = 400) -> str:
+    """串接 a+b，裁掉 a 結尾與 b 開頭重複的部分（相鄰塊本來就有 overlap）。"""
+    if not a:
+        return b
+    if not b:
+        return a
+    limit = min(len(a), len(b), max_overlap)
+    for k in range(limit, 20, -1):
+        if a[-k:] == b[:k]:
+            return a + b[k:]
+    return a + "\n" + b
+
+
+def _expand_neighbor_text(db: Session, chunk, radius: int, max_chars: int) -> str:
+    """小找大：命中塊 + 同文件前後 radius 塊，合併去重（與 RAG /query 一致，帶上下頁脈絡）。"""
+    base = chunk.text or ""
+    if radius <= 0:
+        return base[:max_chars]
+    rows = (
+        db.query(models.DocumentChunk)
+        .filter(
+            models.DocumentChunk.document_id == chunk.document_id,
+            models.DocumentChunk.chunk_index >= chunk.chunk_index - radius,
+            models.DocumentChunk.chunk_index <= chunk.chunk_index + radius,
+        )
+        .order_by(models.DocumentChunk.chunk_index)
+        .all()
+    )
+    if len(rows) <= 1:
+        return base[:max_chars]
+    merged = ""
+    for r in rows:
+        merged = _join_dedup(merged, r.text or "")
+        if len(merged) >= max_chars:
+            break
+    return merged[:max_chars]
+
+
 def _tool_rag_search(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
     query = str(params.get("query") or "").strip()
     if not query:
@@ -86,6 +124,8 @@ def _tool_rag_search(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
 
     selected = rerank.rerank(query, pool, top_k) if (rerank_on and len(pool) > 1) else pool[:top_k]
 
+    radius = getattr(settings, "RAG_NEIGHBOR_RADIUS", 1)
+    expand_cap = getattr(settings, "RAG_EXPAND_MAX_CHARS", 2000)
     out: List[Dict[str, Any]] = []
     for chunk, score in selected:
         doc = chunk.document
@@ -94,8 +134,9 @@ def _tool_rag_search(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
             "title": doc.title,
             "page": chunk.page,
             "score": round(score, 4),
-            # 放寬截斷：snippet 同時用於 ReAct 推理與最後的 grounded 合成引用
-            "snippet": (chunk.text or "")[:1400],
+            # 小找大：帶同文件前後鄰塊（與 RAG /query 一致），讓上下頁脈絡不被切塊邊界截斷。
+            # snippet 同時用於 ReAct 推理與最後的 grounded 合成引用。
+            "snippet": _expand_neighbor_text(db, chunk, radius, expand_cap),
         })
     return {"results": out}
 
