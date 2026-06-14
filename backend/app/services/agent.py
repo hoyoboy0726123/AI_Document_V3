@@ -199,6 +199,18 @@ def _coverage_note(n_unused_sources: int, kg_edges_seen: int) -> str:
     return "\n\n---\n📌 " + "；".join(bits) + "。需要我針對哪一項深入查嗎？"
 
 
+_ENUM_RE = re.compile(
+    r"(有哪些|哪些|列出|列舉|清單|子項目|有什麼|包含哪些|底下有|下有|"
+    r"sub[- ]?items?|list all|list the|what .*(items|tests|sub)|which .*(items|tests))",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_enumeration(q: str) -> bool:
+    """判斷是否為列舉題（有哪些/列出/子項目…），用於確定性 KG 列舉 fallback。"""
+    return bool(_ENUM_RE.search(q or ""))
+
+
 def run_agent(
     db: Session,
     question: str,
@@ -343,33 +355,68 @@ def run_agent(
     if final_text is None:
         final_text = "已達最大步數，未能整合出最終答案。建議縮小問題範圍後重試。"
 
-    # 列舉題：若有 list_subitems 的權威完整清單，且其對象名稱出現在問題中，直接用確定性
-    # 清單作答 —— 不經 RAG 合成（合成是「選擇性引用」會漏項）。這保證「有哪些」類問題完整。
-    if structural_results:
-        ql = question.lower()
-        chosen = next((sr for sr in structural_results
-                       if (sr.get("matched") or "").lower() in ql and sr.get("subitems")), None)
-        if chosen is None and len(structural_results) == 1 and structural_results[0].get("subitems"):
-            chosen = structural_results[0]
-        if chosen:
-            lines = [f"「{chosen['matched']}」共有 {len(chosen['subitems'])} 個子項目："]
-            enum_sources: List[Dict[str, Any]] = []
-            for it in chosen["subitems"]:
-                num = it.get("number")
-                lines.append(f"- {(str(num) + ' ') if num else ''}{it.get('name', '')}")
-                if it.get("document_id"):
-                    enum_sources.append({
-                        "document_id": it.get("document_id"),
-                        "title": it.get("name", ""),
-                        "page": it.get("page"),
-                        "snippet": f"{(str(num) + ' ') if num else ''}{it.get('name', '')}",
-                        "score": None,
-                    })
-            if chosen.get("references"):
-                lines.append(f"\n引用標準：{'、'.join(chosen['references'])}")
-            lines.append("\n（以上為知識圖譜結構的完整列舉）")
-            yield {"type": "final", "text": "\n".join(lines), "sources": enum_sources}
-            return
+    # 列舉題：用 list_subitems 的權威完整清單作答（不經會漏項的 RAG 合成）。
+    ql = question.lower()
+    chosen = None
+    for sr in structural_results:
+        if (sr.get("matched") or "").lower() in ql and sr.get("subitems"):
+            chosen = sr
+            break
+    if chosen is None and len(structural_results) == 1 and structural_results[0].get("subitems"):
+        chosen = structural_results[0]
+    # 確定性 fallback：即使這一輪 LLM 沒呼叫 list_subitems，列舉題仍直接從問題字串解析實體並完整列舉。
+    if chosen is None and _looks_like_enumeration(question):
+        fb = agent_tools.run_tool(db, "list_subitems", {"name": question})
+        if isinstance(fb, dict) and fb.get("subitems"):
+            chosen = {
+                "matched": fb.get("matched"),
+                "subitems": fb.get("subitems"),
+                "references": fb.get("references") or [],
+            }
+
+    if chosen:
+        lines = [f"「{chosen['matched']}」共有 {len(chosen['subitems'])} 個子項目："]
+        enum_sources: List[Dict[str, Any]] = []
+        for it in chosen["subitems"]:
+            num = it.get("number")
+            lines.append(f"- {(str(num) + ' ') if num else ''}{it.get('name', '')}")
+            if it.get("document_id"):
+                enum_sources.append({
+                    "document_id": it.get("document_id"),
+                    "title": it.get("name", ""),
+                    "page": it.get("page"),
+                    "snippet": f"{(str(num) + ' ') if num else ''}{it.get('name', '')}",
+                    "score": None,
+                })
+        if chosen.get("references"):
+            lines.append(f"\n引用標準：{'、'.join(chosen['references'])}")
+        lines.append("\n（以上為知識圖譜結構的完整列舉）")
+        body = "\n".join(lines)
+
+        # 不只列清單：再用檢索到的內容對這組測試做摘要說明，回答「這些在測什麼」。
+        # 若這一輪沒有 rag 證據（例如直接走 fallback），就主動檢索一次以確保有摘要。
+        evidence_for_summary = list(rag_evidence)
+        if not evidence_for_summary:
+            try:
+                rs = agent_tools.run_tool(db, "rag_search", {"query": chosen["matched"], "top_k": 5})
+                if isinstance(rs, dict):
+                    evidence_for_summary = rs.get("results", []) or []
+            except Exception:
+                evidence_for_summary = []
+        if evidence_for_summary:
+            try:
+                sq = (
+                    f"請用 2~4 句話摘要說明「{chosen['matched']}」這組測試整體在測試什麼、目的為何，"
+                    "以段落呈現；不要再列出子項目清單。"
+                )
+                s_ans, _s, _u, _t = _grounded_synthesis(db, sq, evidence_for_summary, [], conversation_history)
+                if s_ans and s_ans.strip():
+                    body += f"\n\n📝 摘要說明：\n{s_ans.strip()}"
+            except Exception as e:
+                logger.warning("enumeration summary failed: %s", e)
+
+        yield {"type": "final", "text": body, "sources": enum_sources}
+        return
 
     # Phase 0：若過程有檢索/KG 證據，最後用 RAG grounding prompt 重新合成帶引用的答案。
     # 合成失敗或無證據時，退回 ReAct 自己的 final_answer。

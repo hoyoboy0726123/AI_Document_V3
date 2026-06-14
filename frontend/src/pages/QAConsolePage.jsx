@@ -373,6 +373,12 @@ const QAConsolePage = () => {
   const handleFollowupSubmit = async () => {
     const question = followupQuestion?.trim();
     if (!question) { message.warning("請輸入追問內容"); return; }
+    setFollowupQuestion("");
+    // 追問沿用目前模式：Agent 模式的追問也走 Agent。
+    if (agentMode) {
+      await runAgentStream(question);
+      return;
+    }
     const currentFormValues = form.getFieldsValue();
     const { document_id, folder_ids } = decodeDocScope(currentFormValues.doc_scope);
     const payload = {
@@ -382,11 +388,11 @@ const QAConsolePage = () => {
       project_id: currentFormValues.project_id || null,
       document_id,
       folder_ids,
-      conversation_history: conversationHistory,
+      // API 只接受 {question, answer}；送整包訊息物件（含 sources/agentSteps）會 422。
+      conversation_history: conversationHistory.map((m) => ({ question: m.question, answer: m.answer })),
       use_ai_fallback: false,
       skip_ai_understanding: false,
     };
-    setFollowupQuestion("");
     await runStream(payload, question);
   };
 
