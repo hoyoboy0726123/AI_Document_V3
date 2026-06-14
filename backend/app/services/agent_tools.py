@@ -10,6 +10,7 @@ The LLM never sees raw SQL.
 """
 from __future__ import annotations
 
+import difflib
 import logging
 import re
 from dataclasses import dataclass
@@ -721,10 +722,60 @@ def render_tools_for_prompt() -> str:
     return "\n".join(lines)
 
 
+def _norm_tool(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def _resolve_tool_name(name: str) -> Optional[str]:
+    """容錯解析工具名：LLM 偶爾把工具名叫錯（rag_sarch、get_sumerules_item_details…）。
+    依「正規化精確 → 同前綴動詞+片段重疊 → difflib 近似」找回最接近的有效工具名。"""
+    if not name:
+        return None
+    keys = list(TOOLS.keys())
+    if name in TOOLS:
+        return name
+    nlow = name.lower().strip()
+    for k in keys:
+        if k.lower() == nlow:
+            return k
+    nname = _norm_tool(name)
+    for k in keys:  # 去掉底線/雜符後完全相同
+        if _norm_tool(k) == nname:
+            return k
+    # token 重疊（同前綴動詞時更可信，如 get_*_details → get_subitem_details）
+    ntoks = set(re.split(r"[^a-z0-9]+", nlow)) - {""}
+    best, best_score = None, 0.0
+    for k in keys:
+        ktoks = set(re.split(r"[^a-z0-9]+", k.lower())) - {""}
+        if not ktoks:
+            continue
+        inter = len(ntoks & ktoks)
+        jacc = inter / len(ntoks | ktoks)
+        score = jacc + (0.2 if (ntoks & ktoks and next(iter(k.split("_")), "") == nlow.split("_")[0]) else 0.0)
+        if score > best_score:
+            best, best_score = k, score
+    if best and best_score >= 0.34:
+        return best
+    m = difflib.get_close_matches(nlow, [k.lower() for k in keys], n=1, cutoff=0.5)
+    if m:
+        for k in keys:
+            if k.lower() == m[0]:
+                return k
+    return None
+
+
+resolve_tool_name = _resolve_tool_name  # public alias（供 agent loop 在分派前正規化 action）
+
+
 def run_tool(db: Session, name: str, params: Dict[str, Any]) -> Dict[str, Any]:
     tool = TOOLS.get(name)
     if not tool:
-        return {"error": f"unknown tool: {name}. Valid: {list(TOOLS.keys())}"}
+        resolved = _resolve_tool_name(name)
+        if resolved:
+            logger.info("tool name '%s' fuzzy-matched to '%s'", name, resolved)
+            tool = TOOLS[resolved]
+        else:
+            return {"error": f"unknown tool: {name}. Valid: {list(TOOLS.keys())}"}
     try:
         return tool.run(db, params or {})
     except Exception as e:

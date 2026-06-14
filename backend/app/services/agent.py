@@ -450,6 +450,10 @@ def run_agent(
             break
 
         action = str(parsed.get("action") or "").strip()
+        # 容錯：LLM 偶爾把工具名叫錯（get_sumerules_item_details…）→ 正規化成有效名，
+        # 讓 SSE 事件、run_tool 分派、以及下方依 action 名的後處理都用同一個正確名稱。
+        if action and action not in agent_tools.TOOLS:
+            action = agent_tools.resolve_tool_name(action) or action
         action_input = parsed.get("action_input") or {}
         if not isinstance(action_input, dict):
             action_input = {"raw": str(action_input)}
