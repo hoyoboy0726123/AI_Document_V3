@@ -129,6 +129,7 @@ def _grounded_synthesis(
 
     # 在預算內塞入 context；裝不下的就是「檢索到但未展開」的來源
     contexts: List[Dict[str, Any]] = []
+    used_sources: List[Dict[str, Any]] = []  # 供前端可點/可預覽的結構化來源（對齊 RAG）
     used = 0
     for ev, text in deduped:
         if used + len(text) > budget:
@@ -141,6 +142,13 @@ def _grounded_synthesis(
             "page": ev.get("page"),
             "page_gap": None,
             "text": text,
+        })
+        used_sources.append({
+            "document_id": ev.get("document_id"),
+            "title": ev.get("title") or "",
+            "page": ev.get("page"),
+            "snippet": ev.get("snippet") or text,
+            "score": ev.get("score"),
         })
         used += len(text)
         if used >= budget:
@@ -160,7 +168,7 @@ def _grounded_synthesis(
             })
 
     if not contexts:
-        return None, 0, total_unique
+        return None, [], 0, total_unique
 
     prompts = SystemConfigService(db).get_rag_prompts()
     answer = ai.generate_rag_answer(
@@ -170,7 +178,7 @@ def _grounded_synthesis(
         system_prompt=prompts["system_prompt"],
         user_template=prompts["user_template"],
     )
-    return answer, n_rag_used, total_unique
+    return answer, used_sources, n_rag_used, total_unique
 
 
 def _coverage_note(n_unused_sources: int, kg_edges_seen: int) -> str:
@@ -318,9 +326,10 @@ def run_agent(
     # Phase 0：若過程有檢索/KG 證據，最後用 RAG grounding prompt 重新合成帶引用的答案。
     # 合成失敗或無證據時，退回 ReAct 自己的 final_answer。
     # Phase 3：合成後依啟發式判斷「還有沒有未展開的來源/關聯」，有的話在答案末尾反問。
+    final_sources: List[Dict[str, Any]] = []
     if rag_evidence or kg_notes:
         try:
-            grounded, n_used, n_total = _grounded_synthesis(
+            grounded, final_sources, n_used, n_total = _grounded_synthesis(
                 db, question, rag_evidence, kg_notes, conversation_history
             )
             if grounded and grounded.strip():
@@ -331,4 +340,4 @@ def run_agent(
         except Exception as e:
             logger.warning("grounded synthesis failed, using raw final_answer: %s", e)
 
-    yield {"type": "final", "text": final_text}
+    yield {"type": "final", "text": final_text, "sources": final_sources}

@@ -58,7 +58,7 @@ def agent_chat(
                 etype = evt.get("type")
                 if etype == "final":
                     final_text = evt.get("text") or ""
-                    yield _sse("final", {"text": final_text})
+                    yield _sse("final", {"text": final_text, "sources": evt.get("sources") or []})
                 elif etype == "error":
                     yield _sse("error", {"message": evt.get("message")})
                 else:

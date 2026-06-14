@@ -244,7 +244,7 @@ const QAConsolePage = () => {
           } : null);
         },
         onFinal: (data) => {
-          setStreamingMsg((prev) => prev ? { ...prev, answer: data.text || "", thinkingDone: true } : null);
+          setStreamingMsg((prev) => prev ? { ...prev, answer: data.text || "", sources: data.sources || [], thinkingDone: true } : null);
         },
         onDone: () => {
           setStreamingMsg((prev) => {
@@ -252,7 +252,7 @@ const QAConsolePage = () => {
             const newMsg = {
               question: prev.question,
               answer: prev.answer,
-              sources: [],
+              sources: prev.sources || [],
               is_followup: false,
               optimized_query: null,
               thinking: "",
@@ -860,7 +860,7 @@ const QAConsolePage = () => {
                           </Text>
                         )}
                       </div>
-                      {!streamingMsg.agentMode && streamingMsg.thinkingDone && renderSources(streamingMsg.sources, "live")}
+                      {streamingMsg.thinkingDone && renderSources(streamingMsg.sources, "live")}
                     </Card>
                   </div>
                 )}
