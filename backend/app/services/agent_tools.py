@@ -18,7 +18,8 @@ from typing import Any, Callable, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from .. import models
-from . import ai, kg_service, vector_store
+from ..core.config import settings
+from . import ai, hybrid_search, kg_service, rerank
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +46,14 @@ def _tool_rag_search(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
     if not embeddings:
         return {"error": "embedding failed"}
 
-    results = vector_store.search(embeddings[0], top_k=top_k * 4)
-    if not results:
+    # 與 RAG /query 一致：向量 + BM25 RRF 融合 → cross-encoder 精選。
+    # （Agent 為全域搜尋，不做 document/分類過濾。）
+    candidate_k = top_k * 4
+    fused, kw_hits = hybrid_search.fuse(db, query, embeddings[0], candidate_k)
+    if not fused:
         return {"results": []}
 
-    faiss_ids = [fid for fid, _ in results]
+    faiss_ids = [fid for fid, _ in fused]
     chunk_rows = (
         db.query(models.DocumentChunk)
         .join(models.Document, models.DocumentChunk.document_id == models.Document.id)
@@ -58,13 +62,32 @@ def _tool_rag_search(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
     )
     chunk_map = {c.faiss_id: c for c in chunk_rows}
 
-    out: List[Dict[str, Any]] = []
-    for fid, score in results:
-        if score < 0.25:
-            continue
+    min_sim = 0.25
+    rerank_on = getattr(settings, "RAG_RERANK", True)
+    pool_size = max(top_k, getattr(settings, "RAG_RERANK_POOL", 12)) if rerank_on else top_k
+
+    pool: List[tuple] = []
+    seen_pages = set()
+    for fid, vscore in fused:
         chunk = chunk_map.get(fid)
         if not chunk:
             continue
+        # keyword-only 命中放行；向量低分且非關鍵字命中才丟棄
+        if vscore is not None and vscore < min_sim and fid not in kw_hits:
+            continue
+        doc = chunk.document
+        page_key = (doc.id, chunk.page)
+        if chunk.page is not None and page_key in seen_pages:
+            continue
+        seen_pages.add(page_key)
+        pool.append((chunk, vscore if vscore is not None else 0.0))
+        if len(pool) >= pool_size:
+            break
+
+    selected = rerank.rerank(query, pool, top_k) if (rerank_on and len(pool) > 1) else pool[:top_k]
+
+    out: List[Dict[str, Any]] = []
+    for chunk, score in selected:
         doc = chunk.document
         out.append({
             "document_id": doc.id,
@@ -74,8 +97,6 @@ def _tool_rag_search(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
             # 放寬截斷：snippet 同時用於 ReAct 推理與最後的 grounded 合成引用
             "snippet": (chunk.text or "")[:1400],
         })
-        if len(out) >= top_k:
-            break
     return {"results": out}
 
 
