@@ -177,6 +177,82 @@ def _tool_document_get(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _natural_key(number):
+    """'12.10' 排在 '12.2' 之後（自然排序）。"""
+    try:
+        return [int(p) for p in str(number or "").split(".") if p != ""]
+    except Exception:
+        return [0]
+
+
+def _tool_list_subitems(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
+    """列出某文件/測試/章節的子項目（KG 結構：contains / part_of）。列舉題用這個，不要用 rag_search。"""
+    name = str(params.get("name") or params.get("query") or "").strip()
+    if not name:
+        return {"error": "name is required"}
+    rows = kg_service.search_entities(db, name, limit=10)
+    if not rows:
+        # 反向比對：LLM 常傳整句（如「ASUS NB 測試計畫中的 Pressure Test」）。
+        # 找「實體名稱出現在查詢字串內」的結構節點，取最長(最具體)者。
+        ql = name.lower()
+        cand = db.query(models.KGEntity).filter(models.KGEntity.type.in_(["section", "document"])).all()
+        rows = sorted(
+            [e for e in cand if e.name and len(e.name) >= 3 and e.name.lower() in ql],
+            key=lambda e: len(e.name or ""),
+            reverse=True,
+        )[:10]
+    if not rows:
+        return {"matched": None, "subitems": [], "hint": "KG 無對應節點；改用 rag_search"}
+
+    q = name.lower()
+
+    def _score(e) -> int:
+        nm = (e.name or "").lower()
+        s = 10 if e.type in ("section", "document") else 0
+        if nm == q:
+            s += 5
+        elif q in nm or nm in q:
+            s += 2
+        return s
+
+    ent = sorted(rows, key=_score, reverse=True)[0]
+
+    # 子項目 = 出向 contains（文件→章節）+ 入向 part_of（子→母）
+    child_ids: List[str] = [
+        r.dst_id for r in db.query(models.KGRelation).filter_by(src_id=ent.id, rel_type="contains").all()
+    ] + [
+        r.src_id for r in db.query(models.KGRelation).filter_by(dst_id=ent.id, rel_type="part_of").all()
+    ]
+    subitems: List[Dict[str, Any]] = []
+    if child_ids:
+        emap = {e.id: e for e in db.query(models.KGEntity).filter(models.KGEntity.id.in_(child_ids)).all()}
+        seen: set = set()
+        for cid in child_ids:
+            if cid in seen:
+                continue
+            seen.add(cid)
+            c = emap.get(cid)
+            if c:
+                meta = c.meta or {}
+                subitems.append({"name": c.name, "kind": meta.get("kind") or c.type, "number": meta.get("number")})
+        subitems.sort(key=lambda x: _natural_key(x.get("number")))
+
+    # 該節點引用的標準
+    refs: List[str] = []
+    for r in db.query(models.KGRelation).filter_by(src_id=ent.id, rel_type="references").all():
+        t = db.query(models.KGEntity).filter_by(id=r.dst_id).first()
+        if t:
+            refs.append(t.canonical_id)
+
+    return {
+        "matched": ent.name,
+        "kind": (ent.meta or {}).get("kind") or ent.type,
+        "subitems": subitems[:60],
+        "subitem_count": len(subitems),
+        "references": refs,
+    }
+
+
 # ───── Registry ───────────────────────────────────────────────────────────
 
 
@@ -248,6 +324,25 @@ TOOLS: Dict[str, Tool] = {
             "required": ["doc_id"],
         },
         run=_tool_document_get,
+    ),
+    "list_subitems": Tool(
+        name="list_subitems",
+        description=(
+            "List the COMPLETE set of sub-items / child sections of a document, test, or "
+            "section BY NAME, from the knowledge-graph structure (contains / part_of). "
+            "USE THIS — not rag_search — for enumeration questions: 'what tests/items does X "
+            "have', '有哪些', 'list all ...', 'sub-tests of ...', 'X 的子項目'. "
+            "Returns the exact full list (rag_search would miss items). Also returns the "
+            "standards that node references."
+        ),
+        schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "document title / test / section name, e.g. 'Pressure Test'"},
+            },
+            "required": ["name"],
+        },
+        run=_tool_list_subitems,
     ),
 }
 

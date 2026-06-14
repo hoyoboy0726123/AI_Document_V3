@@ -44,6 +44,9 @@ Available tools:
 Rules:
 - Output ONE JSON object per turn, nothing else.
 - Use spec_lookup BEFORE spec_references / spec_supersedes_chain to resolve canonical_id.
+- For enumeration / listing questions ("what items/tests does X have", "有哪些", "list all", \
+"子項目", "sub-tests of X"), call list_subitems(name) FIRST. It returns the COMPLETE set from \
+the knowledge graph; rag_search alone retrieves only top-k chunks and WILL miss items.
 - If a tool returns no relevant info, try another tool or a different query — do NOT \
 hallucinate spec content. If the corpus truly lacks info, say so in final_answer.
 - Stop and emit final_answer as soon as you have enough evidence. Do not call \
@@ -223,6 +226,7 @@ def run_agent(
     rag_evidence: List[Dict[str, Any]] = []
     kg_notes: List[str] = []
     kg_edges_seen = 0  # Phase 3：圖譜關聯數，供完整度反問
+    structural_results: List[Dict[str, Any]] = []  # list_subitems 的權威完整清單（列舉題確定性作答）
 
     for step in range(1, max_steps + 1):
         messages: List[Dict[str, Any]] = [
@@ -301,6 +305,22 @@ def run_agent(
                 for res in observation.get("results", []):
                     if isinstance(res, dict):
                         rag_evidence.append(res)
+            elif action == "list_subitems" and "error" not in observation:
+                # 把「完整子項目清單」當成權威證據餵進合成，避免合成只用 RAG 片段而漏項。
+                items = observation.get("subitems") or []
+                names = "、".join(i.get("name", "") for i in items if i.get("name"))
+                cnt = observation.get("subitem_count", len(items))
+                if items:
+                    structural_results.append({
+                        "matched": observation.get("matched"),
+                        "subitems": items,
+                        "references": observation.get("references") or [],
+                    })
+                if names:
+                    kg_notes.append(f"「{observation.get('matched')}」的完整子項目（共 {cnt} 項，來自知識圖譜結構）：{names}")
+                refs = observation.get("references") or []
+                if refs:
+                    kg_notes.append(f"「{observation.get('matched')}」引用的標準：{'、'.join(refs)}")
             elif action in ("spec_references", "spec_supersedes_chain", "spec_lookup", "document_get"):
                 if "error" not in observation:
                     kg_notes.append(f"{action} → " + json.dumps(observation, ensure_ascii=False)[:900])
@@ -322,6 +342,25 @@ def run_agent(
 
     if final_text is None:
         final_text = "已達最大步數，未能整合出最終答案。建議縮小問題範圍後重試。"
+
+    # 列舉題：若有 list_subitems 的權威完整清單，且其對象名稱出現在問題中，直接用確定性
+    # 清單作答 —— 不經 RAG 合成（合成是「選擇性引用」會漏項）。這保證「有哪些」類問題完整。
+    if structural_results:
+        ql = question.lower()
+        chosen = next((sr for sr in structural_results
+                       if (sr.get("matched") or "").lower() in ql and sr.get("subitems")), None)
+        if chosen is None and len(structural_results) == 1 and structural_results[0].get("subitems"):
+            chosen = structural_results[0]
+        if chosen:
+            lines = [f"「{chosen['matched']}」共有 {len(chosen['subitems'])} 個子項目："]
+            for it in chosen["subitems"]:
+                num = it.get("number")
+                lines.append(f"- {(str(num) + ' ') if num else ''}{it.get('name', '')}")
+            if chosen.get("references"):
+                lines.append(f"\n引用標準：{'、'.join(chosen['references'])}")
+            lines.append("\n（以上為知識圖譜結構的完整列舉）")
+            yield {"type": "final", "text": "\n".join(lines), "sources": []}
+            return
 
     # Phase 0：若過程有檢索/KG 證據，最後用 RAG grounding prompt 重新合成帶引用的答案。
     # 合成失敗或無證據時，退回 ReAct 自己的 final_answer。
