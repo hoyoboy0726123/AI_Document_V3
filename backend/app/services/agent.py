@@ -261,18 +261,24 @@ def _try_structural_answer(db: Session, question: str, conversation_history) -> 
         items = det.get("items") or []
         if any(it.get("detail") for it in items):
             label = {"criteria": "判定標準", "specification": "測試規格", "objective": "測試目的"}[aspect]
-            lines = [f"「{det.get('matched')}」各子項目的{label}如下："]
+            is_leaf = det.get("is_leaf")
+            if is_leaf:
+                lines = [f"「{det.get('matched')}」的{label}如下："]
+            else:
+                lines = [f"「{det.get('matched')}」各子項目的{label}如下："]
             sources: List[Dict[str, Any]] = []
             for it in items:
                 num, nm = it.get("number"), it.get("name")
-                lines.append(f"\n### {(str(num) + ' ') if num else ''}{nm}")
+                if not is_leaf:  # 葉節點本身就是標題，不再重複加 ### 子標題
+                    lines.append(f"\n### {(str(num) + ' ') if num else ''}{nm}")
                 lines.append((it.get("detail") or "（此項找不到對應段落，建議改用一般 RAG 查詢）").strip())
                 if it.get("document_id"):
                     sources.append({
                         "document_id": it["document_id"], "title": nm, "page": it.get("page"),
                         "snippet": (it.get("detail") or "")[:200], "score": None,
                     })
-            lines.append("\n（以上為逐一查找各子項目段落的結果，已涵蓋全部子項目）")
+            if not is_leaf:
+                lines.append("\n（以上為逐一查找各子項目段落的結果，已涵蓋全部子項目）")
             return {"text": "\n".join(lines), "sources": sources}
 
     if _looks_like_enumeration(question):

@@ -315,19 +315,31 @@ def _tool_get_subitem_details(db: Session, params: Dict[str, Any]) -> Dict[str, 
         r.src_id for r in db.query(models.KGRelation).filter_by(dst_id=ent.id, rel_type="part_of").all()
     ]
     children = db.query(models.KGEntity).filter(models.KGEntity.id.in_(child_ids)).all() if child_ids else []
-    # 依頁碼排序，用「下一個子項目的頁」當邊界，避免抓到鄰項內容。
-    ordered = sorted(children, key=lambda e: ((e.meta or {}).get("page") or 0, _natural_key((e.meta or {}).get("number"))))
+    # 葉節點（無子項目，如「Shock Test」）→ 取它自己的段落；有子項目 → 逐項取。
+    is_leaf = not children
+    targets = [ent] if is_leaf else children
     phrase = {"criteria": "Testing Criteria", "specification": "Testing Specification", "objective": "Testing Objective"}[aspect]
     kw = _ASPECT_KW[aspect]
 
+    # 本文件所有 section 的頁碼（排序），用來算每個 target 的「下一節」邊界（章節常跨頁，用節邊界較準）。
+    doc_id0 = (ent.meta or {}).get("document_id")
+    all_pages = sorted({
+        (e.meta or {}).get("page")
+        for e in db.query(models.KGEntity).filter(models.KGEntity.type == "section").all()
+        if (e.meta or {}).get("document_id") == doc_id0 and (e.meta or {}).get("page")
+    })
+
+    def _next_section_page(p):
+        return next((x for x in all_pages if x > p), None)
+
     items: List[Dict[str, Any]] = []
-    for idx, c in enumerate(ordered):
+    for c in sorted(targets, key=lambda e: ((e.meta or {}).get("page") or 0, _natural_key((e.meta or {}).get("number")))):
         meta = c.meta or {}
         doc_id, page = meta.get("document_id"), meta.get("page")
-        next_page = (ordered[idx + 1].meta or {}).get("page") if idx + 1 < len(ordered) else None
         detail = None
         if doc_id and page:
-            hi = (next_page - 1) if (next_page and next_page > page) else (page + 4)
+            next_page = _next_section_page(page)
+            hi = (next_page - 1) if (next_page and next_page > page) else (page + 6)
             chunks = (
                 db.query(models.DocumentChunk)
                 .filter(
@@ -394,7 +406,7 @@ def _tool_get_subitem_details(db: Session, params: Dict[str, Any]) -> Dict[str, 
             "name": c.name, "number": meta.get("number"),
             "page": page, "document_id": doc_id, "detail": detail,
         })
-    return {"matched": ent.name, "aspect": aspect, "items": items, "item_count": len(items)}
+    return {"matched": ent.name, "aspect": aspect, "items": items, "item_count": len(items), "is_leaf": is_leaf}
 
 
 # ───── Registry ───────────────────────────────────────────────────────────
