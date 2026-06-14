@@ -211,6 +211,96 @@ def _looks_like_enumeration(q: str) -> bool:
     return bool(_ENUM_RE.search(q or ""))
 
 
+_ASPECT_RE = [
+    ("criteria", re.compile(r"(判定標準|判定基準|驗收標準|合格標準|測試標準|criteria|criterion)", re.IGNORECASE)),
+    ("specification", re.compile(r"(測試規格|規格|測試條件|specification|\bspec\b)", re.IGNORECASE)),
+    ("objective", re.compile(r"(測試目的|目的|用途|objective)", re.IGNORECASE)),
+]
+
+
+def _detect_aspect(q: str) -> Optional[str]:
+    """偵測『細節橫跨多項目』問題的面向：判定標準 / 規格 / 目的。"""
+    for aspect, rx in _ASPECT_RE:
+        if rx.search(q or ""):
+            return aspect
+    return None
+
+
+def _group_summary(db: Session, matched: str, conversation_history) -> str:
+    """對一組測試做 2~4 句摘要（自行檢索內容），供列舉題附加說明。"""
+    try:
+        rs = agent_tools.run_tool(db, "rag_search", {"query": matched, "top_k": 5})
+        ev = rs.get("results", []) if isinstance(rs, dict) else []
+        if not ev:
+            return ""
+        sq = (
+            f"請用 2~4 句話摘要說明「{matched}」這組測試整體在測試什麼、目的為何，"
+            "以段落呈現；不要再列出子項目清單。"
+        )
+        ans, _s, _u, _t = _grounded_synthesis(db, sq, ev, [], conversation_history)
+        return ans.strip() if ans else ""
+    except Exception as e:
+        logger.warning("group summary failed: %s", e)
+        return ""
+
+
+def _try_structural_answer(db: Session, question: str, conversation_history) -> Optional[Dict[str, Any]]:
+    """結構性問題快速路徑（不跑慢的 ReAct loop，直接查 KG 確定性作答）：
+      - 細節橫跨多子項目（X 的判定標準/規格/目的 各是什麼）→ 逐項抓段落
+      - 列舉（X 有哪些子項目）→ 完整清單 + 摘要
+    回傳 {"text", "sources"} 或 None。對象名稱會從『問題 + 最近一輪歷史』解析（處理「這些測試」）。
+    """
+    search_text = question or ""
+    if conversation_history:
+        last = conversation_history[-1]
+        search_text = f"{question} {last.get('question', '')} {(last.get('answer', '') or '')[:200]}"
+
+    aspect = _detect_aspect(question)
+    if aspect:
+        det = agent_tools.run_tool(db, "get_subitem_details", {"name": search_text, "aspect": aspect})
+        items = det.get("items") or []
+        if any(it.get("detail") for it in items):
+            label = {"criteria": "判定標準", "specification": "測試規格", "objective": "測試目的"}[aspect]
+            lines = [f"「{det.get('matched')}」各子項目的{label}如下："]
+            sources: List[Dict[str, Any]] = []
+            for it in items:
+                num, nm = it.get("number"), it.get("name")
+                lines.append(f"\n### {(str(num) + ' ') if num else ''}{nm}")
+                lines.append((it.get("detail") or "（此項找不到對應段落，建議改用一般 RAG 查詢）").strip())
+                if it.get("document_id"):
+                    sources.append({
+                        "document_id": it["document_id"], "title": nm, "page": it.get("page"),
+                        "snippet": (it.get("detail") or "")[:200], "score": None,
+                    })
+            lines.append("\n（以上為逐一查找各子項目段落的結果，已涵蓋全部子項目）")
+            return {"text": "\n".join(lines), "sources": sources}
+
+    if _looks_like_enumeration(question):
+        sub = agent_tools.run_tool(db, "list_subitems", {"name": search_text})
+        subitems = sub.get("subitems") or []
+        if subitems:
+            lines = [f"「{sub.get('matched')}」共有 {len(subitems)} 個子項目："]
+            sources = []
+            for it in subitems:
+                num, nm = it.get("number"), it.get("name")
+                lines.append(f"- {(str(num) + ' ') if num else ''}{nm}")
+                if it.get("document_id"):
+                    sources.append({
+                        "document_id": it["document_id"], "title": nm, "page": it.get("page"),
+                        "snippet": f"{(str(num) + ' ') if num else ''}{nm}", "score": None,
+                    })
+            if sub.get("references"):
+                lines.append(f"\n引用標準：{'、'.join(sub['references'])}")
+            lines.append("\n（以上為知識圖譜結構的完整列舉）")
+            body = "\n".join(lines)
+            summary = _group_summary(db, sub.get("matched") or question, conversation_history)
+            if summary:
+                body += f"\n\n📝 摘要說明：\n{summary}"
+            return {"text": body, "sources": sources}
+
+    return None
+
+
 def run_agent(
     db: Session,
     question: str,
@@ -226,6 +316,17 @@ def run_agent(
       {"type": "final", "text": str}
       {"type": "error", "message": str}
     """
+    # 快速路徑：結構性問題（列舉 / 逐項細節）直接查 KG 確定性作答，跳過慢的 ReAct loop。
+    try:
+        quick = _try_structural_answer(db, question, conversation_history)
+    except Exception as e:
+        logger.warning("structural fast-path failed: %s", e)
+        quick = None
+    if quick:
+        yield {"type": "thought", "step": 0, "text": "偵測到結構性問題，直接查知識圖譜結構作答。"}
+        yield {"type": "final", "text": quick["text"], "sources": quick.get("sources", [])}
+        return
+
     llm = get_llm_provider()
     tools_desc = agent_tools.render_tools_for_prompt()
     system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(tools=tools_desc, max_steps=max_steps)

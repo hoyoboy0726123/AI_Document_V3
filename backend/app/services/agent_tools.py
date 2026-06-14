@@ -11,6 +11,7 @@ The LLM never sees raw SQL.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
@@ -259,6 +260,127 @@ def _tool_list_subitems(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _resolve_named_structural(db: Session, name: str):
+    """名稱 → 結構節點：先 forward 子字串搜尋，再 reverse-containment（名稱出現在查詢字串內）。"""
+    rows = kg_service.search_entities(db, name, limit=10)
+    if not rows:
+        ql = name.lower()
+        cand = db.query(models.KGEntity).filter(models.KGEntity.type.in_(["section", "document"])).all()
+        rows = sorted(
+            [e for e in cand if e.name and len(e.name) >= 3 and e.name.lower() in ql],
+            key=lambda e: len(e.name or ""), reverse=True,
+        )[:10]
+    if not rows:
+        return None
+    q = name.lower()
+
+    def _score(e) -> int:
+        nm = (e.name or "").lower()
+        s = 10 if e.type in ("section", "document") else 0
+        if nm == q:
+            s += 5
+        elif q in nm or nm in q:
+            s += 2
+        return s
+
+    return sorted(rows, key=_score, reverse=True)[0]
+
+
+_ASPECT_KW = {
+    "criteria": ["criteria", "criterion", "判定", "驗收", "合格"],
+    "specification": ["specification", "規格", "spec"],
+    "objective": ["objective", "目的", "purpose"],
+}
+
+
+def _tool_get_subitem_details(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
+    """逐項抓細節：對某父節點的每個子項目，分別抓出它自己的 criteria/spec/objective 段落。
+
+    用於「這些測試的判定標準各是什麼」這類『細節橫跨多個子項目』的問題 —— top-k 檢索抓不齊，
+    這裡用 KG 已知的每個子項目頁碼，逐一精準定位各自段落，保證全部涵蓋。
+    """
+    name = str(params.get("name") or params.get("query") or "").strip()
+    aspect = str(params.get("aspect") or "criteria").strip().lower()
+    if aspect not in _ASPECT_KW:
+        aspect = "criteria"
+    if not name:
+        return {"error": "name is required"}
+    ent = _resolve_named_structural(db, name)
+    if not ent:
+        return {"matched": None, "items": [], "hint": "KG 無對應節點"}
+
+    child_ids = [
+        r.dst_id for r in db.query(models.KGRelation).filter_by(src_id=ent.id, rel_type="contains").all()
+    ] + [
+        r.src_id for r in db.query(models.KGRelation).filter_by(dst_id=ent.id, rel_type="part_of").all()
+    ]
+    children = db.query(models.KGEntity).filter(models.KGEntity.id.in_(child_ids)).all() if child_ids else []
+    # 依頁碼排序，用「下一個子項目的頁」當邊界，避免抓到鄰項內容。
+    ordered = sorted(children, key=lambda e: ((e.meta or {}).get("page") or 0, _natural_key((e.meta or {}).get("number"))))
+    phrase = {"criteria": "Testing Criteria", "specification": "Testing Specification", "objective": "Testing Objective"}[aspect]
+    kw = _ASPECT_KW[aspect]
+
+    items: List[Dict[str, Any]] = []
+    for idx, c in enumerate(ordered):
+        meta = c.meta or {}
+        doc_id, page = meta.get("document_id"), meta.get("page")
+        next_page = (ordered[idx + 1].meta or {}).get("page") if idx + 1 < len(ordered) else None
+        detail = None
+        if doc_id and page:
+            hi = (next_page - 1) if (next_page and next_page > page) else (page + 4)
+            chunks = (
+                db.query(models.DocumentChunk)
+                .filter(
+                    models.DocumentChunk.document_id == doc_id,
+                    models.DocumentChunk.page >= page,
+                    models.DocumentChunk.page <= hi,
+                )
+                .order_by(models.DocumentChunk.page, models.DocumentChunk.chunk_index)
+                .all()
+            )
+            joined = "\n".join(ch.text or "" for ch in chunks)
+            low = joined.lower()
+            number = meta.get("number")
+            ph = r"\s+".join(re.escape(w) for w in phrase.split())  # 對空白寬鬆，如 Testing\s+Criteria
+            pos = -1
+            # 1) 最精準：用「本項編號 + 子節 + 小節名」定位（如 "12.6.7 Testing Criteria"），
+            #    避免抓到鄰項或下一個 section（最後一項範圍較寬時尤其重要）。
+            if number:
+                matches = list(re.finditer(re.escape(str(number)) + r"\.\d+\s*" + ph, joined, re.IGNORECASE))
+                if matches:
+                    m = matches[-1]  # 頁面內容偶有重複（前者常為誤抽），取最後一個實質段落
+                    pm = re.search(ph, joined[m.start():], re.IGNORECASE)
+                    pos = m.start() + (pm.start() if pm else 0)
+            # 2) 退而求其次：第一次出現的小節名。
+            if pos < 0:
+                m = re.search(ph, joined, re.IGNORECASE)
+                pos = m.start() if m else -1
+            # 3) 最後用關鍵字。
+            if pos < 0:
+                for k in kw:
+                    i = low.find(k.lower())
+                    if i >= 0:
+                        pos = i
+                        break
+            if pos >= 0:
+                seg = joined[pos:pos + 1400]
+                # 切到下一個小節標題/頁尾，去掉 Testing Result 表、頁碼、下一個測試項等尾巴雜訊。
+                tail = re.search(
+                    r"(Testing (Result|Objective|Specification|Procedure|Location)|Copyright\s*\d{4})",
+                    seg[len(phrase):], re.IGNORECASE,
+                )
+                if tail:
+                    seg = seg[: len(phrase) + tail.start()]
+                detail = seg.strip()[:900]
+            elif joined:
+                detail = joined[:500].strip()
+        items.append({
+            "name": c.name, "number": meta.get("number"),
+            "page": page, "document_id": doc_id, "detail": detail,
+        })
+    return {"matched": ent.name, "aspect": aspect, "items": items, "item_count": len(items)}
+
+
 # ───── Registry ───────────────────────────────────────────────────────────
 
 
@@ -349,6 +471,25 @@ TOOLS: Dict[str, Tool] = {
             "required": ["name"],
         },
         run=_tool_list_subitems,
+    ),
+    "get_subitem_details": Tool(
+        name="get_subitem_details",
+        description=(
+            "For a parent test/document, return EACH sub-item's specific section content for an "
+            "aspect (criteria / specification / objective). USE THIS for 'what are the criteria/"
+            "specs/objectives of these tests', 'X 的判定標準/規格/目的 各是什麼', i.e. a DETAIL that "
+            "spans many sub-items. Locates each sub-item's own section by its KG page, so all "
+            "sub-items are covered (rag_search would miss most)."
+        ),
+        schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "parent name, e.g. 'Pressure Test'"},
+                "aspect": {"type": "string", "description": "criteria | specification | objective (default criteria)"},
+            },
+            "required": ["name"],
+        },
+        run=_tool_get_subitem_details,
     ),
 }
 
