@@ -180,10 +180,12 @@ def _build_pp_structure() -> "PPStructureV3":
         raise RuntimeError("PPStructureV3 未安裝，請先 pip install 'paddlex[ocr]'")
 
     # Windows CPU 已知問題：
-    # - MKLDNN/onednn 在 layout/table 模型上會丟 ConvertPirAttribute2RuntimeAttribute 錯
-    #   → 由 module 載入時的 FLAGS_use_mkldnn=0 統一關閉
+    # - MKLDNN/onednn 在 layout/table/det 模型上會在 predictor.run() 丟 "Unknown exception"
+    #   (PIR 新執行器會忽略 module 層的 FLAGS_use_mkldnn，必須在建構時明確 enable_mkldnn=False，
+    #    與能正常運作的 _build_paddle_ocr() 一致，否則文字偵測推論會 crash → 退回 basic OCR、表格全丟)
     # - server 級 OCR 模型 (PP-OCRv5_server_det/rec) 會 segfault → 改用 mobile
     return PPStructureV3(
+        enable_mkldnn=False,
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
         use_textline_orientation=False,
