@@ -269,7 +269,19 @@ def _group_summary(db: Session, matched: str, conversation_history) -> str:
         return ""
 
 
-_STRUCT_SNIPPET_CAP = 700  # 每個子項餵進合成的內容上限（讓多個子項能一起塞進 num_ctx 預算）
+_STRUCT_SNIPPET_CAP = 1400  # 每個子項餵進合成的內容上限（夠長到容納像 12.1 那種多段規格）
+
+
+def _cap_clean(text: str, cap: int) -> str:
+    """截斷到 cap 字內，但切在換行/句界，避免把內容切成半字（如「each 3 c」）。"""
+    if not text or len(text) <= cap:
+        return text
+    cut = text[:cap]
+    for sep in ("\n", "。", "; ", "；", ". "):
+        i = cut.rfind(sep)
+        if i > cap * 0.6:
+            return cut[: i + len(sep)].rstrip()
+    return cut.rstrip()
 
 
 def _structural_evidence(db: Session, question: str, conversation_history) -> Optional[Dict[str, Any]]:
@@ -318,7 +330,7 @@ def _structural_evidence(db: Session, question: str, conversation_history) -> Op
             "document_id": it["document_id"],
             "title": label or nm,
             "page": it.get("page"),
-            "snippet": content[:_STRUCT_SNIPPET_CAP],
+            "snippet": _cap_clean(content, _STRUCT_SNIPPET_CAP),
             "score": None,
         })
 
