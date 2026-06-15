@@ -89,6 +89,11 @@ class Settings(BaseSettings):
     RAG_CONTEXT_BUDGET_CHARS: int = 6000
     RAG_OUTPUT_RESERVE_CHARS: int = 3000       # 預留給「生成」的視窗額度（夾限時扣除）；調高以容納多來源長答案
 
+    # OCR(PP-StructureV3)頁面影像大小。paddle CPU 在「大尺寸影像」上跑 layout/table 模型會
+    # native segfault(實測 2200px 的頁面會整個 crash、1600px 正常)。把頁面影像上限壓到安全值。
+    OCR_DPI: int = 150
+    OCR_MAX_DIMENSION: int = 1600
+
     # 混合檢索（向量 + BM25 關鍵字，用 RRF 融合）。對「靠關鍵字才找得到的分散子項目」recall 大幅提升。
     # 僅 SQLite 生效（FTS5 trigram）；非 SQLite 自動退回純向量。
     RAG_HYBRID_SEARCH: bool = True

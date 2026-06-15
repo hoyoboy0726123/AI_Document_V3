@@ -22,6 +22,7 @@ import numpy as np
 from PIL import Image
 
 from .pdf_image import get_pdf_page_count, pdf_page_to_image
+from ..core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -277,7 +278,12 @@ def extract_image_pdf_blocks_with_structure(pdf_path: str) -> List[Dict[str, Any
     blocks: List[OCRBlock] = []
 
     for page_num in range(1, page_count + 1):
-        img_bytes = pdf_page_to_image(pdf_path, page_num, dpi=200, max_dimension=2200)
+        # paddle CPU 在大尺寸影像上會 native segfault → 壓到安全上限（見 config OCR_MAX_DIMENSION）
+        img_bytes = pdf_page_to_image(
+            pdf_path, page_num,
+            dpi=getattr(settings, "OCR_DPI", 150),
+            max_dimension=getattr(settings, "OCR_MAX_DIMENSION", 1600),
+        )
         if not img_bytes:
             logger.warning("PPStructure 跳過頁面 %s：轉圖失敗", page_num)
             continue
@@ -347,7 +353,12 @@ def extract_image_pdf_blocks(pdf_path: str) -> List[Dict[str, Any]]:
     blocks: List[OCRBlock] = []
 
     for page_num in range(1, page_count + 1):
-        img_bytes = pdf_page_to_image(pdf_path, page_num, dpi=200, max_dimension=2200)
+        # paddle CPU 在大尺寸影像上會 native segfault → 壓到安全上限（見 config OCR_MAX_DIMENSION）
+        img_bytes = pdf_page_to_image(
+            pdf_path, page_num,
+            dpi=getattr(settings, "OCR_DPI", 150),
+            max_dimension=getattr(settings, "OCR_MAX_DIMENSION", 1600),
+        )
         if not img_bytes:
             logger.warning("PaddleOCR 跳過頁面 %s：轉圖失敗", page_num)
             continue
