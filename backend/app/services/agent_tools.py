@@ -478,6 +478,12 @@ def _tool_get_subitem_details(db: Session, params: Dict[str, Any]) -> Dict[str, 
                 detail = "\n".join(deduped).strip()[:2400]
             elif joined:
                 detail = joined[:600].strip()
+        if detail:
+            # 把黏在一起的條列項補換行（如「…allowed.3.The system…」）。
+            # 只在「非數字字元 + 1~2 位數字. + 後接字母」時切，避免誤切小數（1.0/3.6/2.5）與章節號（12.4）。
+            detail = re.sub(r"(?<=\S)(?<!\d)(\d{1,2}\.)(?=\s*[A-Za-z])", r"\n\1", detail)
+            # 列號後緊接字母時補一個空格（2.During → 2. During）；小數因點後為數字而不受影響。
+            detail = re.sub(r"(?<!\d)(\d{1,2}\.)(?=[A-Za-z])", r"\1 ", detail)
         items.append({
             "name": c.name, "number": meta.get("number"),
             "page": page, "document_id": doc_id, "detail": detail,
