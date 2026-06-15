@@ -269,88 +269,74 @@ def _group_summary(db: Session, matched: str, conversation_history) -> str:
         return ""
 
 
-def _try_structural_answer(db: Session, question: str, conversation_history) -> Optional[Dict[str, Any]]:
-    """結構性問題快速路徑（不跑慢的 ReAct loop，直接查 KG 確定性作答）：
-      - 細節橫跨多子項目（X 的判定標準/規格/目的 各是什麼）→ 逐項抓段落
-      - 列舉（X 有哪些子項目）→ 完整清單 + 摘要
-    回傳 {"text", "sources"} 或 None。對象名稱會從『問題 + 最近一輪歷史』解析（處理「這些測試」）。
+_STRUCT_SNIPPET_CAP = 700  # 每個子項餵進合成的內容上限（讓多個子項能一起塞進 num_ctx 預算）
+
+
+def _structural_evidence(db: Session, question: str, conversation_history) -> Optional[Dict[str, Any]]:
+    """結構性問題（判定標準/規格/目的/列舉/概覽）→ 用 KG 把「全部子項的內容」撈齊，
+    回傳 {rag_evidence, kg_notes, matched} 供 `_grounded_synthesis`(LLM) 合成最完整答案。
+
+    重點:KG 在這裡的角色是「保證證據完整」(含關鍵字撈不到的子項),最終答案仍由 LLM 結合
+    RAG 風格的引用紀律合成 —— 不再用套版直接回傳。對象名稱從『問題 + 最近一輪歷史』解析。
     """
+    aspect = _detect_aspect(question)
+    is_overview = _looks_like_overview(question)
+    is_enum = _looks_like_enumeration(question)
+    if not (aspect or is_overview or is_enum):
+        return None
+
     search_text = question or ""
     if conversation_history:
         last = conversation_history[-1]
         search_text = f"{question} {last.get('question', '')} {(last.get('answer', '') or '')[:200]}"
 
-    aspect = _detect_aspect(question)
+    # 依問題面向取內容：有 aspect → 抓該面向段落；否則抓整節內容。
     if aspect:
         det = agent_tools.run_tool(db, "get_subitem_details", {"name": search_text, "aspect": aspect})
         items = det.get("items") or []
-        if any(it.get("detail") for it in items):
-            label = {"criteria": "判定標準", "specification": "測試規格", "objective": "測試目的"}[aspect]
-            is_leaf = det.get("is_leaf")
-            if is_leaf:
-                lines = [f"「{det.get('matched')}」的{label}如下："]
-            else:
-                lines = [f"「{det.get('matched')}」各子項目的{label}如下："]
-            sources: List[Dict[str, Any]] = []
-            for it in items:
-                num, nm = it.get("number"), it.get("name")
-                if not is_leaf:  # 葉節點本身就是標題，不再重複加 ### 子標題
-                    lines.append(f"\n### {(str(num) + ' ') if num else ''}{nm}")
-                lines.append((it.get("detail") or "（此項找不到對應段落，建議改用一般 RAG 查詢）").strip())
-                if it.get("document_id"):
-                    sources.append({
-                        "document_id": it["document_id"], "title": nm, "page": it.get("page"),
-                        "snippet": (it.get("detail") or "")[:200], "score": None,
-                    })
-            if not is_leaf:
-                lines.append("\n（以上為逐一查找各子項目段落的結果，已涵蓋全部子項目）")
-            return {"text": "\n".join(lines), "sources": sources}
+        content_key = "detail"
+    else:
+        det = agent_tools.run_tool(db, "coverage_check", {"name": search_text})
+        items = det.get("items") or []
+        content_key = "excerpt"
 
-    if _looks_like_enumeration(question):
-        sub = agent_tools.run_tool(db, "list_subitems", {"name": search_text})
-        subitems = sub.get("subitems") or []
-        if subitems:
-            lines = [f"「{sub.get('matched')}」共有 {len(subitems)} 個子項目："]
-            sources = []
-            for it in subitems:
-                num, nm = it.get("number"), it.get("name")
-                lines.append(f"- {(str(num) + ' ') if num else ''}{nm}")
-                if it.get("document_id"):
-                    sources.append({
-                        "document_id": it["document_id"], "title": nm, "page": it.get("page"),
-                        "snippet": f"{(str(num) + ' ') if num else ''}{nm}", "score": None,
-                    })
-            if sub.get("references"):
-                lines.append(f"\n引用標準：{'、'.join(sub['references'])}")
-            lines.append("\n（以上為知識圖譜結構的完整列舉）")
-            body = "\n".join(lines)
-            summary = _group_summary(db, sub.get("matched") or question, conversation_history)
-            if summary:
-                body += f"\n\n📝 摘要說明：\n{summary}"
-            return {"text": body, "sources": sources}
+    matched = det.get("matched")
+    if not matched or not items:
+        return None
 
-    # 類別/概覽題（介紹/說明/各項…）→ 用 coverage_check 確定性涵蓋「全部子項 + 各自內容」，
-    # 不依賴 RAG（會漏不含關鍵字的子項）也不依賴 LLM 自選名稱（可能誤命中同名葉節點）。
-    if _looks_like_overview(question):
-        cov = agent_tools.run_tool(db, "coverage_check", {"name": search_text})
-        items = cov.get("items") or []
-        if cov.get("matched") and not cov.get("is_leaf") and len(items) >= 2:
-            lines = [f"「{cov.get('matched')}」共有 {len(items)} 個子項目，逐項內容如下："]
-            sources: List[Dict[str, Any]] = []
-            for it in items:
-                num, nm = it.get("number"), it.get("name")
-                lines.append(f"\n### {(str(num) + ' ') if num else ''}{nm}")
-                ex = (it.get("excerpt") or "").strip()
-                lines.append(ex if ex else "（此項找不到對應段落，建議改用一般 RAG 查詢）")
-                if it.get("document_id"):
-                    sources.append({
-                        "document_id": it["document_id"], "title": nm, "page": it.get("page"),
-                        "snippet": ex[:200], "score": None,
-                    })
-            lines.append("\n（以上為知識圖譜結構的完整覆蓋，已涵蓋全部子項目）")
-            return {"text": "\n".join(lines), "sources": sources}
+    rag_evidence: List[Dict[str, Any]] = []
+    all_names: List[str] = []
+    for it in items:
+        num, nm = it.get("number"), it.get("name")
+        label = f"{(str(num) + ' ') if num else ''}{nm}".strip()
+        if nm:
+            all_names.append(label)
+        content = (it.get(content_key) or "").strip()
+        if not content or not it.get("document_id"):
+            continue
+        rag_evidence.append({
+            "document_id": it["document_id"],
+            "title": label or nm,
+            "page": it.get("page"),
+            "snippet": content[:_STRUCT_SNIPPET_CAP],
+            "score": None,
+        })
 
-    return None
+    if not rag_evidence:
+        return None
+
+    # 權威完整清單當作 KG note，明確要求 LLM「全部涵蓋」(即使某些子項內容被預算截短也不可遺漏)。
+    kg_notes: List[str] = []
+    if all_names:
+        kg_notes.append(
+            f"「{matched}」在知識圖譜結構下共有 {len(all_names)} 個子項目，"
+            f"回答必須完整涵蓋每一個：{'、'.join(all_names)}"
+        )
+    refs = det.get("references") or []
+    if refs:
+        kg_notes.append(f"「{matched}」引用的標準：{'、'.join(refs)}")
+
+    return {"rag_evidence": rag_evidence, "kg_notes": kg_notes, "matched": matched}
 
 
 def run_agent(
@@ -368,16 +354,27 @@ def run_agent(
       {"type": "final", "text": str}
       {"type": "error", "message": str}
     """
-    # 快速路徑：結構性問題（列舉 / 逐項細節）直接查 KG 確定性作答，跳過慢的 ReAct loop。
+    # 結構性問題（列舉 / 逐項細節 / 概覽）：用 KG 把「全部子項內容」撈齊(保證完整、含關鍵字漏撈的子項)，
+    # 再交給 RAG grounded 合成由 LLM 產生最完整、有引用的答案 —— 不用套版直接回傳。
     try:
-        quick = _try_structural_answer(db, question, conversation_history)
+        struct = _structural_evidence(db, question, conversation_history)
     except Exception as e:
-        logger.warning("structural fast-path failed: %s", e)
-        quick = None
-    if quick:
-        yield {"type": "thought", "step": 0, "text": "偵測到結構性問題，直接查知識圖譜結構作答。"}
-        yield {"type": "final", "text": quick["text"], "sources": quick.get("sources", [])}
-        return
+        logger.warning("structural evidence gather failed: %s", e)
+        struct = None
+    if struct:
+        yield {"type": "thought", "step": 0,
+               "text": f"偵測到結構性問題：用知識圖譜撈齊「{struct.get('matched')}」全部子項，再結合 RAG 合成完整答案。"}
+        try:
+            ans, sources, _u, _t = _grounded_synthesis(
+                db, question, struct["rag_evidence"], struct["kg_notes"], conversation_history
+            )
+        except Exception as e:
+            logger.warning("structural grounded synthesis failed: %s", e)
+            ans, sources = None, []
+        if ans and ans.strip():
+            yield {"type": "final", "text": ans.strip(), "sources": sources or []}
+            return
+        # 合成失敗 → 落回下方完整 ReAct loop
 
     llm = get_llm_provider()
     tools_desc = agent_tools.render_tools_for_prompt()
