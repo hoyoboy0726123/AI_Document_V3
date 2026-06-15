@@ -257,9 +257,9 @@ const KnowledgeGraphPage = () => {
             <Card title="節點詳情" size="small">
               <Space direction="vertical" style={{ width: "100%" }} size={4}>
                 <Tag color={TYPE_COLORS[selectedNode.type] || "default"}>{selectedNode.type}</Tag>
-                <Text strong>{selectedNode.canonical_id}</Text>
+                <Text strong>{selectedNode.name || selectedNode.canonical_id}</Text>
                 {selectedNode.name !== selectedNode.canonical_id && (
-                  <Text type="secondary" style={{ fontSize: 12 }}>{selectedNode.name}</Text>
+                  <Text type="secondary" style={{ fontSize: 12, wordBreak: "break-all" }}>{selectedNode.canonical_id}</Text>
                 )}
                 <Button
                   size="small"
@@ -310,7 +310,7 @@ const KnowledgeGraphPage = () => {
                   graphData={graphData}
                   width={size.width}
                   height={size.height}
-                  nodeLabel={(n) => `${n.canonical_id} (${n.type})`}
+                  nodeLabel={(n) => `${n.name || n.canonical_id} (${n.type})\n${n.canonical_id}`}
                   nodeColor={(n) => n.color}
                   nodeRelSize={6}
                   linkColor={(l) => l.color}
@@ -320,7 +320,9 @@ const KnowledgeGraphPage = () => {
                   onNodeClick={handleNodeClick}
                   cooldownTicks={120}
                   nodeCanvasObject={(node, ctx, globalScale) => {
-                    const label = node.canonical_id;
+                    // 顯示乾淨名稱（章節標題 / 文件標題 / 標準編號），而非系統內部 canonical_id（doc:uuid#NN）。
+                    const raw = node.name || node.canonical_id;
+                    const label = raw.length > 24 ? `${raw.slice(0, 23)}…` : raw;
                     const fontSize = 12 / globalScale;
                     ctx.font = `${fontSize}px sans-serif`;
                     ctx.fillStyle = node.color;
