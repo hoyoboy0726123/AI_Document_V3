@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from PIL import Image
@@ -210,6 +211,56 @@ def _page_label(block: Dict, idx: int) -> str:
     return f"第 {page} 頁 ⚠️ 頁距 {gap}，可能為不同章節"
 
 
+def _split_md_row(line: str) -> List[str]:
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [c.strip() for c in s.split("|")]
+
+
+def _augment_tables_rowwise(text: str) -> str:
+    """偵測 markdown 管線表格，於該表後附「逐列 key=value」序列化。
+
+    動機：小模型（如 gemma-12b）讀寬 pipe-table 做「查某列某欄的值」會失敗（對不齊 row-key↔欄），
+    但逐列 `欄=值` 格式就讀得出來（已實測）。原表格保留（供整表呈現），額外附逐列（供查特定值）。
+    """
+    if not text or "|" not in text:
+        return text
+    lines = text.split("\n")
+    out: List[str] = []
+    i, n = 0, len(lines)
+    while i < n:
+        is_table_head = (
+            lines[i].count("|") >= 2
+            and i + 1 < n
+            and "-" in lines[i + 1]
+            and set(lines[i + 1].strip()) <= set("|-: ")
+            and lines[i + 1].count("|") >= 2
+        )
+        if is_table_head:
+            header = _split_md_row(lines[i])
+            j = i + 2
+            data = []
+            while j < n and lines[j].count("|") >= 2:
+                data.append(_split_md_row(lines[j]))
+                j += 1
+            out.append("\n".join(lines[i:j]))  # 原表格保留
+            rw = []
+            for k, row in enumerate(data, start=1):
+                pairs = [f"{h}={v}" for h, v in zip(header, row) if h.strip() and v.strip()]
+                if pairs:
+                    rw.append(f"第{k}列: " + "; ".join(pairs))
+            if rw:
+                out.append("（上表逐列）：\n" + "\n".join(rw))
+            i = j
+        else:
+            out.append(lines[i])
+            i += 1
+    return "\n".join(out)
+
+
 def _build_rag_messages(
     question: str,
     context_blocks: List[Dict[str, str]],
@@ -229,8 +280,12 @@ def _build_rag_messages(
     sys_msg = system_prompt if system_prompt is not None else DEFAULT_RAG_SYSTEM_PROMPT
     tmpl = user_template if user_template is not None else DEFAULT_RAG_USER_TEMPLATE
 
+    # 只對「最相關的前 N 個來源」做表格逐列增強：逐列序列化會讓含表格的塊大約加倍，
+    # 若每個來源都加會撐爆 num_ctx 導致生成退化（實測）。最相關的表格通常排在最前面。
+    _aug_top = getattr(settings, "RAG_TABLE_ROWWISE_TOP", 1)
     context_text = "\n\n".join(
-        f"[來源{block.get('source_num', idx + 1)}] {block.get('title') or '未命名段落'} ({_page_label(block, idx)})\n{(block.get('text') or '').strip()}"
+        f"[來源{block.get('source_num', idx + 1)}] {block.get('title') or '未命名段落'} ({_page_label(block, idx)})\n"
+        + (_augment_tables_rowwise((block.get('text') or '').strip()) if idx < _aug_top else (block.get('text') or '').strip())
         for idx, block in enumerate(context_blocks)
     )
 

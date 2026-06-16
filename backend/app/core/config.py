@@ -99,6 +99,9 @@ class Settings(BaseSettings):
 
     # 混合檢索（向量 + BM25 關鍵字，用 RRF 融合）。對「靠關鍵字才找得到的分散子項目」recall 大幅提升。
     # 僅 SQLite 生效（FTS5 trigram）；非 SQLite 自動退回純向量。
+    # 表格逐列增強：只對最相關的前 N 個來源把表格序列化成「逐列 key=value」(幫小模型查 cell)；
+    # 全部都加會讓 context 加倍而撐爆 num_ctx → 生成退化，故預設只增強最前面 1 個。
+    RAG_TABLE_ROWWISE_TOP: int = 1
     RAG_HYBRID_SEARCH: bool = True
     RAG_RRF_K: int = 60                         # RRF 常數，越大越平滑（標準值 60）
     # 融合後餵進 LLM 的「context 塊數」上限。hybrid recall 高但塊一多就破碎，

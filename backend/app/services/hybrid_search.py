@@ -34,6 +34,9 @@ _BUILD_LOCK = threading.Lock()
 # trigram tokenizer 需要 token 長度 ≥ 3 才能命中
 _EN_TOKEN_RE = re.compile(r"[A-Za-z0-9]{3,}")
 _CJK_RUN_RE = re.compile(r"[一-鿿]{3,}")
+# 小數/帶點數字整體保留（如 101.78、34.8500），讓「查表格某數值」能精準命中該列
+# （trigram 對 "101.78" 會命中 "101.7800"）；否則 [A-Za-z0-9]{3,} 會把它拆成 "101" 等無鑑別力的詞。
+_DECIMAL_RE = re.compile(r"\d+(?:\.\d+)+")
 
 
 def _sqlite_path(db: Session) -> Optional[str]:
@@ -88,6 +91,8 @@ def _build_match(query: str) -> Optional[str]:
     if not query:
         return None
     terms: List[str] = []
+    # 帶小數的數字整體保留（高鑑別力，能獨指某一列）
+    terms.extend(_DECIMAL_RE.findall(query))
     for tok in _EN_TOKEN_RE.findall(query):
         terms.append(tok.lower())
     terms.extend(_CJK_RUN_RE.findall(query))

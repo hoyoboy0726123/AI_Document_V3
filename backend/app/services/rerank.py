@@ -149,6 +149,22 @@ def _score_llm(query: str, candidates) -> Optional[dict]:
     return _parse_scores(raw)
 
 
+def _guarantee_fused_top(candidates, result, top_n):
+    """保底：融合(向量+BM25)排第 1 的候選必須留在最終結果裡。
+
+    rerank 對「數字表 / 跨語言 / 精準關鍵字命中」評分常不準，可能把融合第 1 名（例如
+    唯一含查詢數值 "101.78" 的那一列）整個踢出 top_n。融合第 1 名是最強檢索信號，
+    保底把它放回（置頂），避免「明明撈到了卻被 rerank 丟掉」。
+    """
+    res = result[:top_n]
+    if not candidates:
+        return res
+    top1 = candidates[0]
+    if any(r[0] is top1[0] for r in res):
+        return res
+    return ([top1] + res)[:top_n]
+
+
 # ── 對外入口 ─────────────────────────────────────────────────────────
 def rerank(query: str, candidates: List[Tuple[object, float]], top_n: int):
     """對 candidates=[(chunk, score)] 重排，回傳重排後的 [(chunk, score)]（最多 top_n）。
@@ -177,7 +193,7 @@ def rerank(query: str, candidates: List[Tuple[object, float]], top_n: int):
                 "rerank[cross_encoder]: %d -> %d kept (top_n=%d)",
                 len(candidates), len(kept), top_n,
             )
-            return [(c, orig) for c, orig, _s, _i in kept][:top_n]
+            return _guarantee_fused_top(candidates, [(c, orig) for c, orig, _s, _i in kept], top_n)
         # cross-encoder 不可用 → 降級到 llm
 
     # 2) llm 後端
@@ -194,4 +210,4 @@ def rerank(query: str, candidates: List[Tuple[object, float]], top_n: int):
     kept = [r for r in ranked if r[2] >= min_score] or ranked
     kept.sort(key=lambda r: (-r[2], r[3]))
     logger.info("rerank[llm]: %d -> %d kept (top_n=%d)", len(candidates), len(kept), top_n)
-    return [(chunk, orig_score) for chunk, orig_score, _s, _i in kept][:top_n]
+    return _guarantee_fused_top(candidates, [(chunk, orig_score) for chunk, orig_score, _s, _i in kept], top_n)

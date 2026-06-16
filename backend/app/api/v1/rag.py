@@ -48,8 +48,8 @@ def _expand_chunk_text(db: Session, chunk, *, radius: int, max_chars: int) -> st
     避免句子/數值被切塊邊界截斷（如「允收標準：」與「1.5G RMS」被切成兩塊）。
     """
     base = chunk.text or ""
-    if radius <= 0:
-        return base
+    if radius <= 0 or len(base) >= max_chars:
+        return base[:max_chars]
     rows = (
         db.query(models.DocumentChunk)
         .filter(
@@ -62,12 +62,19 @@ def _expand_chunk_text(db: Session, chunk, *, radius: int, max_chars: int) -> st
     )
     if len(rows) <= 1:
         return base
-    merged = ""
-    for r in rows:
-        merged = _join_dedup(merged, r.text or "")
-        if len(merged) >= max_chars:
-            break
-    return merged[:max_chars]
+    # 命中塊「完整保留」，鄰塊只填剩餘預算（否則前一塊會把命中塊擠掉、害表格被截尾，
+    # 例如查 101.78 卻只看到表格前兩列）。後鄰取其開頭（接續），前鄰取其結尾（最靠近命中）。
+    hi = chunk.chunk_index
+    nxt = next((r.text or "" for r in rows if r.chunk_index == hi + 1), "")
+    prv = next((r.text or "" for r in rows if r.chunk_index == hi - 1), "")
+    result = base
+    rem = max_chars - len(result)
+    if rem > 0 and nxt:
+        result = _join_dedup(result, nxt[:rem])
+    rem = max_chars - len(result)
+    if rem > 0 and prv:
+        result = _join_dedup(prv[-rem:], result)
+    return result[:max_chars]
 
 
 def _context_text_budgeted(db: Session, chunk, ctx_used: int) -> str:
