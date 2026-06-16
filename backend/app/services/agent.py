@@ -351,6 +351,44 @@ def _structural_evidence(db: Session, question: str, conversation_history) -> Op
     return {"rag_evidence": rag_evidence, "kg_notes": kg_notes, "matched": matched}
 
 
+def _seed_evidence_via_rag(db: Session, question: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    """用「使用者原始問題」跑 /rag/query 完全相同的檢索，回傳 rag_evidence 形狀的證據。
+
+    刻意重用 rag.py 的 _hybrid_filtered / _context_keep_ids / _context_text_budgeted，
+    讓 Agent 的基準證據與 RAG 模式逐字一致（已驗證對地端與雲端都能撈到正確的表格段）。
+    """
+    import types as _types
+    from ..api.v1 import rag as rag_api  # lazy import to avoid import cycle
+
+    embeddings = ai.embed_texts([question])
+    if not embeddings:
+        return []
+    cfg = SystemConfigService(db).get_vector_config()
+    payload = _types.SimpleNamespace(
+        question=question, top_k=top_k, document_id=None, classification_id=None,
+        project_id=None, folder_ids=None,
+    )
+    filtered = rag_api._hybrid_filtered(db, payload, question, embeddings[0], cfg, top_k)
+    if not filtered:
+        return []
+    keep_ids = rag_api._context_keep_ids(filtered)
+    evidence: List[Dict[str, Any]] = []
+    ctx_used = 0
+    for chunk, score in filtered:
+        if chunk.id not in keep_ids:
+            continue
+        text = rag_api._context_text_budgeted(db, chunk, ctx_used)
+        ctx_used += len(text)
+        evidence.append({
+            "document_id": chunk.document_id,
+            "title": chunk.document.title if chunk.document else "",
+            "page": chunk.page,
+            "score": score,
+            "snippet": text,
+        })
+    return evidence
+
+
 def run_agent(
     db: Session,
     question: str,
@@ -401,6 +439,20 @@ def run_agent(
     kg_notes: List[str] = []
     kg_edges_seen = 0  # Phase 3：圖譜關聯數，供完整度反問
     structural_results: List[Dict[str, Any]] = []  # list_subitems 的權威完整清單（列舉題確定性作答）
+
+    # 雲地相容 seed：先用「使用者原始問題」做一次確定性檢索，把命中段落放進 rag_evidence。
+    # 關鍵：走 /rag/query 完全相同的檢索（_hybrid_filtered + 同樣的 context 預算），
+    # 而不是 agent 自己那條較弱的 rag_search 工具——後者排序不同會把資料表排到預算外。
+    # 這保證最終 grounded 合成一定握有「對的證據」，不因換模型（尤其雲端）在 ReAct loop
+    # 自擬關鍵字偏掉而撈錯段。ReAct loop 仍照常進行、可再補 KG/額外證據；合成時會去重。
+    try:
+        seeded = _seed_evidence_via_rag(db, question, top_k=5)
+        rag_evidence.extend(seeded)
+        if seeded:
+            yield {"type": "thought", "step": 0,
+                   "text": "先以原始問題做一次基準檢索（與 RAG 同一條 pipeline），確保證據齊全且與所用模型無關。"}
+    except Exception as e:
+        logger.warning("agent seed retrieval failed: %s", e)
 
     for step in range(1, max_steps + 1):
         messages: List[Dict[str, Any]] = [

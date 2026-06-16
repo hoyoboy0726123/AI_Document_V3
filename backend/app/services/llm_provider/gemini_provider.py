@@ -14,9 +14,38 @@ return a 404 — that's a config error, not a runtime bug.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# Gemini's free/shared tier intermittently returns transient errors
+# (500 INTERNAL / 503 UNAVAILABLE / 429 RESOURCE_EXHAUSTED). These are not our
+# bug and usually succeed on a quick retry, so wrap generate calls with backoff.
+_RETRYABLE = ("500", "503", "429", "INTERNAL", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED")
+
+
+def _is_retryable(exc: Exception) -> bool:
+    s = str(exc)
+    return any(tok in s for tok in _RETRYABLE)
+
+
+def _with_retry(fn, *, attempts: int = 3, base_delay: float = 1.5):
+    """Call fn(); retry on transient Gemini errors with linear backoff."""
+    last: Optional[Exception] = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            last = e
+            if i == attempts - 1 or not _is_retryable(e):
+                raise
+            delay = base_delay * (i + 1)
+            logger.warning("Gemini transient error (attempt %d/%d), retrying in %.1fs: %s",
+                           i + 1, attempts, delay, str(e)[:160])
+            time.sleep(delay)
+    if last:
+        raise last
 
 
 def _lazy_import():
@@ -159,11 +188,11 @@ class GeminiProvider:
         ]
         config = self._build_config(system_instruction=system, format=format, options=options)
         try:
-            resp = self._client.models.generate_content(
+            resp = _with_retry(lambda: self._client.models.generate_content(
                 model=target,
                 contents=contents,
                 config=config,
-            )
+            ))
         except Exception as e:
             logger.error("Gemini chat error: %s", e)
             raise RuntimeError(f"Gemini API 錯誤：{e}") from e
@@ -229,11 +258,11 @@ class GeminiProvider:
 
         config = self._build_config(system_instruction=system, format=format, options=options)
         try:
-            resp = self._client.models.generate_content(
+            resp = _with_retry(lambda: self._client.models.generate_content(
                 model=target,
                 contents=[self._types.Content(role="user", parts=parts)],
                 config=config,
-            )
+            ))
         except Exception as e:
             logger.error("Gemini generate error: %s", e)
             raise RuntimeError(f"Gemini API 錯誤：{e}") from e
