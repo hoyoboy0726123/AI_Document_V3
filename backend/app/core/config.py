@@ -93,6 +93,9 @@ class Settings(BaseSettings):
     # native segfault(實測 2200px 的頁面會整個 crash、1600px 正常)。把頁面影像上限壓到安全值。
     OCR_DPI: int = 150
     OCR_MAX_DIMENSION: int = 1600
+    # 子進程隔離:每頁在 worker 子進程跑 PP-Structure,某頁 native segfault 不拖垮整份(崩潰頁退回 basic OCR)。
+    OCR_SUBPROCESS_ISOLATION: bool = True
+    OCR_WORKER_TIMEOUT: int = 3600              # 單次 worker 子進程逾時(秒)
 
     # 混合檢索（向量 + BM25 關鍵字，用 RRF 融合）。對「靠關鍵字才找得到的分散子項目」recall 大幅提升。
     # 僅 SQLite 生效（FTS5 trigram）；非 SQLite 自動退回純向量。

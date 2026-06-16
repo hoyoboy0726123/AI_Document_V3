@@ -15,6 +15,7 @@ from dataclasses import dataclass, asdict
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional
 import io
+import json
 import logging
 import re
 
@@ -263,84 +264,240 @@ def _replace_html_tables_with_markdown(text: str) -> str:
     return _TABLE_RE.sub(_sub, text)
 
 
-def extract_image_pdf_blocks_with_structure(pdf_path: str) -> List[Dict[str, Any]]:
-    """以 PP-StructureV3 做版面分析，輸出含 markdown 表格的逐頁文字。
+def _ppstructure_page_blocks(pipeline, pdf_path: str, page_num: int) -> List[OCRBlock]:
+    """單頁 PP-Structure：轉圖 → predict → markdown → OCRBlock 清單。
 
-    使用 PaddleX 原生 `_to_markdown(pretty=False)` 拿到整頁 markdown
-    (標題/段落/列表都已格式化、表格保留為乾淨的 `<table>...</table>`)，
-    再把每個 `<table>` 區塊用 `_html_table_to_markdown()` 轉成 markdown 管線表格。
+    注意：`pipeline.predict()` 在大尺寸/特殊頁面上可能 **native segfault**（直接殺掉整個
+    process，Python try/except 攔不到）。in-process 呼叫者請自行承擔；要對單頁崩潰免疫，
+    走 `extract_image_pdf_blocks_isolated()`（子進程隔離）。
     """
+    blocks: List[OCRBlock] = []
+    # paddle CPU 在大尺寸影像上會 native segfault → 壓到安全上限（見 config OCR_MAX_DIMENSION）
+    img_bytes = pdf_page_to_image(
+        pdf_path, page_num,
+        dpi=getattr(settings, "OCR_DPI", 150),
+        max_dimension=getattr(settings, "OCR_MAX_DIMENSION", 1600),
+    )
+    if not img_bytes:
+        logger.warning("PPStructure 跳過頁面 %s：轉圖失敗", page_num)
+        return blocks
+
+    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    img_array = np.array(img)
+    result = pipeline.predict(img_array)
+
+    page_paragraphs = 0
+    for page_result in result or []:
+        try:
+            md_dict = page_result._to_markdown(pretty=False)
+        except Exception as exc:
+            logger.warning("PPStructure 第 %s 頁 _to_markdown 失敗 (%s)，跳過", page_num, exc)
+            continue
+
+        raw_markdown = (md_dict or {}).get("markdown_texts") or ""
+        if not raw_markdown.strip():
+            continue
+
+        converted = _replace_html_tables_with_markdown(raw_markdown)
+        # 以連續空行切段，每段一個 paragraph block。
+        paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", converted) if p.strip()]
+        for para in paragraphs:
+            page_paragraphs += 1
+            has_table = "|" in para and "---" in para
+            blocks.append(
+                OCRBlock(
+                    block_type="table" if has_table else "paragraph",
+                    text=para,
+                    page=page_num,
+                    paragraph_index=page_paragraphs,
+                    markdown=para if has_table else None,
+                    metadata={"ocr_engine": "ppstructurev3"},
+                )
+            )
+    return blocks
+
+
+def extract_image_pdf_blocks_with_structure(pdf_path: str) -> List[Dict[str, Any]]:
+    """以 PP-StructureV3 做版面分析，輸出含 markdown 表格的逐頁文字（in-process，不隔離）。"""
     pipeline = _build_pp_structure()
     page_count = get_pdf_page_count(pdf_path)
     if page_count <= 0:
         return []
 
     blocks: List[OCRBlock] = []
-
     for page_num in range(1, page_count + 1):
-        # paddle CPU 在大尺寸影像上會 native segfault → 壓到安全上限（見 config OCR_MAX_DIMENSION）
-        img_bytes = pdf_page_to_image(
-            pdf_path, page_num,
-            dpi=getattr(settings, "OCR_DPI", 150),
-            max_dimension=getattr(settings, "OCR_MAX_DIMENSION", 1600),
-        )
-        if not img_bytes:
-            logger.warning("PPStructure 跳過頁面 %s：轉圖失敗", page_num)
-            continue
-
         try:
-            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-            img_array = np.array(img)
+            page_blocks = _ppstructure_page_blocks(pipeline, pdf_path, page_num)
         except Exception as exc:
-            logger.warning("PPStructure 跳過頁面 %s：圖片解碼失敗 (%s)", page_num, exc)
-            continue
-
-        try:
-            result = pipeline.predict(img_array)
-        except Exception as exc:
-            logger.warning("PPStructure 第 %s 頁推論失敗 (%s)，將改用 basic OCR", page_num, exc)
+            logger.warning("PPStructure 第 %s 頁推論失敗 (%s)，整體改用 basic OCR", page_num, exc)
             raise
-
-        page_paragraphs = 0
-        for page_result in result or []:
-            try:
-                md_dict = page_result._to_markdown(pretty=False)
-            except Exception as exc:
-                logger.warning("PPStructure 第 %s 頁 _to_markdown 失敗 (%s)，跳過", page_num, exc)
-                continue
-
-            raw_markdown = (md_dict or {}).get("markdown_texts") or ""
-            if not raw_markdown.strip():
-                continue
-
-            converted = _replace_html_tables_with_markdown(raw_markdown)
-
-            # 以連續空行切段，每段一個 paragraph block —
-            # split_segments_into_chunks 再依 max_chars 重新合併成向量塊。
-            paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", converted) if p.strip()]
-            for para in paragraphs:
-                page_paragraphs += 1
-                has_table = "|" in para and "---" in para
-                blocks.append(
-                    OCRBlock(
-                        block_type="table" if has_table else "paragraph",
-                        text=para,
-                        page=page_num,
-                        paragraph_index=page_paragraphs,
-                        markdown=para if has_table else None,
-                        metadata={"ocr_engine": "ppstructurev3"},
-                    )
-                )
-
-        logger.info("PPStructure 完成第 %s 頁，抽出 %s 段 markdown", page_num, page_paragraphs)
+        blocks.extend(page_blocks)
+        logger.info("PPStructure 完成第 %s 頁，抽出 %s 段 markdown", page_num, len(page_blocks))
 
     return normalize_ocr_blocks(blocks)
+
+
+def _jsonl_done_pages(path: str) -> set:
+    done = set()
+    try:
+        with io.open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    done.add(json.loads(line).get("page"))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return {p for p in done if p}
+
+
+def _progress_crashed_page(prog: str) -> Optional[int]:
+    """progress 內「最後一個有 START 卻沒 DONE」的頁碼 = native crash 那頁。"""
+    started: List[int] = []
+    done: set = set()
+    for ln in prog.splitlines():
+        ln = ln.strip()
+        if ln.startswith("START "):
+            try:
+                started.append(int(ln.split()[1]))
+            except Exception:
+                pass
+        elif ln.startswith("DONE "):
+            try:
+                done.add(int(ln.split()[1]))
+            except Exception:
+                pass
+    for p in reversed(started):
+        if p not in done:
+            return p
+    return None
+
+
+def _basic_ocr_single_page(ocr, pdf_path: str, page_num: int) -> List[OCRBlock]:
+    """單頁 basic PaddleOCR（純文字），給 PP-Structure 崩潰頁 fallback。"""
+    out: List[OCRBlock] = []
+    img_bytes = pdf_page_to_image(
+        pdf_path, page_num,
+        dpi=getattr(settings, "OCR_DPI", 150),
+        max_dimension=getattr(settings, "OCR_MAX_DIMENSION", 1600),
+    )
+    if not img_bytes:
+        return out
+    try:
+        arr = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
+        result = ocr.predict(arr)
+    except Exception as exc:
+        logger.warning("crashed-page %s basic OCR fallback failed: %s", page_num, exc)
+        return out
+    li = 0
+    for pr in result or []:
+        for t in (pr.get("rec_texts", []) or []):
+            t = str(t or "").strip()
+            if not t:
+                continue
+            li += 1
+            out.append(OCRBlock(
+                block_type="paragraph", text=t, page=page_num, paragraph_index=li,
+                metadata={"ocr_engine": "paddleocr", "fallback": "crashed_page"},
+            ))
+    return out
+
+
+def extract_image_pdf_blocks_isolated(pdf_path: str) -> List[Dict[str, Any]]:
+    """子進程隔離版 PP-Structure OCR：每頁在 worker 子進程跑，某頁 native segfault 不會拖垮
+    整份；崩潰頁自動退回 basic PaddleOCR（純文字）。worker 模型只載一次，僅在崩潰時重啟。
+    """
+    import os
+    import subprocess
+    import sys
+    import tempfile
+
+    page_count = get_pdf_page_count(pdf_path)
+    if page_count <= 0:
+        return []
+
+    backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    tmpdir = tempfile.mkdtemp(prefix="ocr_iso_")
+    out_jsonl = os.path.join(tmpdir, "out.jsonl")
+    progress = os.path.join(tmpdir, "prog.txt")
+    io.open(out_jsonl, "w").close()
+
+    crashed: set = set()
+    max_crashes = max(3, page_count // 4 + 1)
+
+    while True:
+        done = _jsonl_done_pages(out_jsonl)
+        if len(done) + len(crashed) >= page_count:
+            break
+        run_skip = done | crashed
+        io.open(progress, "w").close()
+        env = dict(os.environ)
+        env.setdefault("FLAGS_use_mkldnn", "0")
+        env.setdefault("FLAGS_use_pir_in_executor", "0")
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "app.services.ocr_worker",
+                 pdf_path, out_jsonl, progress, ",".join(map(str, sorted(run_skip)))],
+                cwd=backend_dir, env=env, capture_output=True,
+                timeout=getattr(settings, "OCR_WORKER_TIMEOUT", 3600),
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("OCR worker 逾時")
+            break
+        prog = ""
+        try:
+            with io.open(progress, encoding="utf-8") as f:
+                prog = f.read()
+        except Exception:
+            pass
+        if "ALL_DONE" in prog:
+            break
+        cp = _progress_crashed_page(prog)
+        if cp is None or cp in crashed:
+            logger.warning("OCR isolated：無法判定崩潰頁（或重複），停止重啟")
+            break
+        logger.warning("OCR isolated：第 %s 頁讓 PP-Structure native crash，跳過並改用 basic OCR", cp)
+        crashed.add(cp)
+        if len(crashed) > max_crashes:
+            logger.warning("OCR isolated：崩潰頁過多 (%s)，停止", len(crashed))
+            break
+
+    page_to_blocks: Dict[int, List[OCRBlock]] = {}
+    try:
+        with io.open(out_jsonl, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                page_to_blocks[rec.get("page")] = [OCRBlock(**b) for b in rec.get("blocks", [])]
+    except Exception as exc:
+        logger.warning("OCR isolated：讀取結果失敗 %s", exc)
+
+    if crashed:
+        try:
+            ocr = _build_paddle_ocr()
+            for p in sorted(crashed):
+                page_to_blocks[p] = _basic_ocr_single_page(ocr, pdf_path, p)
+        except Exception as exc:
+            logger.warning("OCR isolated：崩潰頁 basic OCR fallback 失敗 %s", exc)
+
+    all_blocks: List[OCRBlock] = []
+    for p in range(1, page_count + 1):
+        all_blocks.extend(page_to_blocks.get(p, []))
+    logger.info("OCR isolated 完成：%s 頁，崩潰頁 %s（已退回 basic OCR）", page_count, sorted(crashed))
+    return normalize_ocr_blocks(all_blocks)
 
 
 def extract_image_pdf_blocks(pdf_path: str) -> List[Dict[str, Any]]:
     """圖片型 PDF OCR：優先用 PP-StructureV3（表格→markdown），失敗則退回 PaddleOCR 純文字。"""
     if PPStructureV3 is not None:
         try:
+            if getattr(settings, "OCR_SUBPROCESS_ISOLATION", True):
+                return extract_image_pdf_blocks_isolated(pdf_path)
             return extract_image_pdf_blocks_with_structure(pdf_path)
         except Exception as exc:
             logger.warning("PPStructureV3 整體流程失敗，改用 basic PaddleOCR：%s", exc)
