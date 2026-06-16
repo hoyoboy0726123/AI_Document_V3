@@ -31,6 +31,7 @@ import {
   ThunderboltOutlined,
   ToolOutlined,
   EyeOutlined,
+  FileSearchOutlined,
 } from "@ant-design/icons";
 import apiClient from "../../services/api";
 
@@ -97,6 +98,9 @@ const SystemSettings = () => {
   const [llmProviderConfig, setLlmProviderConfig] = useState(null);
   const [savingLlm, setSavingLlm] = useState(false);
   const [testingLlm, setTestingLlm] = useState(false);
+
+  const [ocrForm] = Form.useForm();
+  const [savingOcr, setSavingOcr] = useState(false);
 
   // 載入系統配置
   const fetchConfig = async () => {
@@ -207,9 +211,42 @@ const SystemSettings = () => {
     }
   };
 
+  const fetchOcrConfig = async () => {
+    try {
+      const resp = await apiClient.get("admin/ocr-config");
+      ocrForm.setFieldsValue({
+        engine: resp.data.engine || "rapid",
+        model_tier: resp.data.model_tier || "mobile",
+        version: resp.data.version || "PP-OCRv4",
+        device: resp.data.device || "cpu",
+      });
+    } catch (e) {
+      // silent — admin-only or backend unreachable
+    }
+  };
+
+  const handleSaveOcrConfig = async (values) => {
+    setSavingOcr(true);
+    try {
+      await apiClient.put("admin/ocr-config", {
+        engine: values.engine,
+        model_tier: values.model_tier,
+        version: values.version,
+        device: values.device,
+      });
+      message.success("OCR 設定已儲存,下一份文件 OCR 將使用新設定");
+      await fetchOcrConfig();
+    } catch (error) {
+      message.error(error.response?.data?.detail ?? "儲存失敗");
+    } finally {
+      setSavingOcr(false);
+    }
+  };
+
   useEffect(() => {
     fetchConfig();
     fetchLlmProviderConfig();
+    fetchOcrConfig();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -535,6 +572,80 @@ const SystemSettings = () => {
                 測試 VL 模型
               </Button>
               <Button onClick={() => llmProviderForm.resetFields()}>重置</Button>
+            </Space>
+          </Form.Item>
+        </Form>
+      </Card>
+
+      {/* OCR 引擎設定 */}
+      <Card
+        title={
+          <span>
+            <FileSearchOutlined style={{ marginRight: 8 }} />
+            OCR 引擎設定
+          </span>
+        }
+        style={{ marginBottom: 16 }}
+      >
+        <Alert
+          message="圖片型 PDF 的文字／表格辨識引擎"
+          description={
+            <div>
+              <p><strong>引擎:</strong> rapid = 輕量 onnx(RapidLayout+RapidTable+RapidOCR),快(~4s/頁)、無 paddle/segfault;pp_structure = PaddleOCR PP-StructureV3(重、保底)。</p>
+              <p><strong>等級／版本:</strong> mobile+PP-OCRv4 快又乾淨(預設);server+PP-OCRv5 近乎完美但 CPU 上 ~87s/頁(GPU 才實用)。</p>
+              <p style={{ marginBottom: 0 }}><strong>裝置:</strong> cpu 開發機用;gpu 需正式機裝 onnxruntime-gpu(如 5090)。設定只影響「之後新 OCR 的文件」,既有文件可用單份「高精度重跑」。</p>
+            </div>
+          }
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+        />
+        <Form
+          form={ocrForm}
+          layout="vertical"
+          onFinish={handleSaveOcrConfig}
+          initialValues={{ engine: "rapid", model_tier: "mobile", version: "PP-OCRv4", device: "cpu" }}
+        >
+          <Row gutter={16}>
+            <Col span={6}>
+              <Form.Item label="OCR 引擎" name="engine">
+                <Radio.Group size="small">
+                  <Radio.Button value="rapid">rapid</Radio.Button>
+                  <Radio.Button value="pp_structure">pp_structure</Radio.Button>
+                </Radio.Group>
+              </Form.Item>
+            </Col>
+            <Col span={6}>
+              <Form.Item label="模型等級" name="model_tier" extra="server 準但慢(CPU)">
+                <Radio.Group size="small">
+                  <Radio.Button value="mobile">mobile</Radio.Button>
+                  <Radio.Button value="server">server</Radio.Button>
+                </Radio.Group>
+              </Form.Item>
+            </Col>
+            <Col span={6}>
+              <Form.Item label="OCR 版本" name="version">
+                <Radio.Group size="small">
+                  <Radio.Button value="PP-OCRv4">v4</Radio.Button>
+                  <Radio.Button value="PP-OCRv5">v5</Radio.Button>
+                </Radio.Group>
+              </Form.Item>
+            </Col>
+            <Col span={6}>
+              <Form.Item label="裝置" name="device" extra="gpu 需 onnxruntime-gpu">
+                <Radio.Group size="small">
+                  <Radio.Button value="cpu">cpu</Radio.Button>
+                  <Radio.Button value="gpu">gpu</Radio.Button>
+                </Radio.Group>
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item>
+            <Space>
+              <Button type="primary" htmlType="submit" icon={<SaveOutlined />} loading={savingOcr}>
+                儲存 OCR 設定
+              </Button>
+              <Button onClick={() => fetchOcrConfig()}>重置</Button>
             </Space>
           </Form.Item>
         </Form>

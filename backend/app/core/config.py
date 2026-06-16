@@ -97,6 +97,16 @@ class Settings(BaseSettings):
     OCR_SUBPROCESS_ISOLATION: bool = True
     OCR_WORKER_TIMEOUT: int = 3600              # 單次 worker 子進程逾時(秒)
 
+    # OCR 引擎選擇(可在 admin 切換)。
+    #  rapid        = 輕量 onnx 三件套(RapidLayout+RapidTable+RapidOCR);快(~4s/頁)、無 paddle/segfault。
+    #  pp_structure = PaddleOCR PP-StructureV3(重、有 segfault 風險,保底用)。
+    OCR_ENGINE: str = "rapid"                   # rapid | pp_structure
+    # rapid 後端的 OCR 模型等級/版本/裝置：
+    #  mobile + PP-OCRv4 ~4s/頁、結構乾淨(預設)；server + PP-OCRv5 近乎完美但 CPU ~87s/頁(GPU 才實用)。
+    OCR_MODEL_TIER: str = "mobile"              # mobile | server
+    OCR_VERSION: str = "PP-OCRv4"               # PP-OCRv4 | PP-OCRv5
+    OCR_DEVICE: str = "cpu"                     # cpu | gpu(需 onnxruntime-gpu;正式機 5090 用)
+
     # 混合檢索（向量 + BM25 關鍵字，用 RRF 融合）。對「靠關鍵字才找得到的分散子項目」recall 大幅提升。
     # 僅 SQLite 生效（FTS5 trigram）；非 SQLite 自動退回純向量。
     # 表格逐列增強：只對最相關的前 N 個來源把表格序列化成「逐列 key=value」(幫小模型查 cell)；

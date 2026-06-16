@@ -218,9 +218,36 @@ def apply_llm_overrides_from_db() -> None:
         logger.warning("apply_llm_overrides_from_db failed: %s", exc)
 
 
+def apply_ocr_overrides_from_db() -> None:
+    """Copy OCR engine settings from system_configs into in-memory settings on startup."""
+    try:
+        from .services.system_config import SystemConfigService
+
+        db = SessionLocal()
+        try:
+            overrides = SystemConfigService(db).get_ocr_config()
+            mapping = {
+                "ocr.engine": "OCR_ENGINE",
+                "ocr.model_tier": "OCR_MODEL_TIER",
+                "ocr.version": "OCR_VERSION",
+                "ocr.device": "OCR_DEVICE",
+            }
+            for k, attr in mapping.items():
+                if k in overrides:
+                    try:
+                        setattr(settings, attr, overrides[k])
+                    except Exception:
+                        pass
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("apply_ocr_overrides_from_db failed: %s", exc)
+
+
 ensure_schema_updates()
 ensure_default_admin()
 apply_llm_overrides_from_db()
+apply_ocr_overrides_from_db()
 
 # Initialize rate limiter
 limiter = Limiter(key_func=get_remote_address)

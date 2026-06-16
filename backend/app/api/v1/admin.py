@@ -677,6 +677,75 @@ def test_vision_provider(
         return {"ok": False, "error": str(e)[:200]}
 
 
+@router.get("/ocr-config")
+@router.get("/ocr-config/")
+def get_ocr_config(
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_admin_user),
+):
+    """Read current OCR engine config (DB overrides + defaults merged)."""
+    _ = current_admin
+    overrides = SystemConfigService(db).get_ocr_config()
+    return {
+        "engine": overrides.get("ocr.engine") or settings.OCR_ENGINE,
+        "model_tier": overrides.get("ocr.model_tier") or settings.OCR_MODEL_TIER,
+        "version": overrides.get("ocr.version") or settings.OCR_VERSION,
+        "device": overrides.get("ocr.device") or settings.OCR_DEVICE,
+        "options": {
+            "engine": ["rapid", "pp_structure"],
+            "model_tier": ["mobile", "server"],
+            "version": ["PP-OCRv4", "PP-OCRv5"],
+            "device": ["cpu", "gpu"],
+        },
+    }
+
+
+@router.put("/ocr-config")
+@router.put("/ocr-config/")
+def update_ocr_config(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_admin_user),
+):
+    """Update OCR engine config; mutates in-memory settings + invalidates rapid engine cache."""
+    _ = current_admin
+    valid = {
+        "engine": {"rapid", "pp_structure"},
+        "model_tier": {"mobile", "server"},
+        "version": {"PP-OCRv4", "PP-OCRv5"},
+        "device": {"cpu", "gpu"},
+    }
+    for k, allowed in valid.items():
+        if k in payload and payload[k] not in allowed:
+            raise HTTPException(status_code=400, detail=f"{k} must be one of {sorted(allowed)}")
+
+    db_payload = {}
+    attr_map = {
+        "engine": ("ocr.engine", "OCR_ENGINE"),
+        "model_tier": ("ocr.model_tier", "OCR_MODEL_TIER"),
+        "version": ("ocr.version", "OCR_VERSION"),
+        "device": ("ocr.device", "OCR_DEVICE"),
+    }
+    for k, (db_key, attr) in attr_map.items():
+        if k in payload:
+            db_payload[db_key] = payload[k]
+            try:
+                setattr(settings, attr, payload[k])
+            except Exception:
+                pass
+
+    SystemConfigService(db).update_ocr_config(db_payload)
+
+    # rebuild rapid engines on next OCR run with the new tier/version/device
+    try:
+        from ...services.rapid_ocr import invalidate as invalidate_rapid
+        invalidate_rapid()
+    except Exception as exc:
+        logger.warning("rapid_ocr invalidate failed: %s", exc)
+
+    return {"ok": True}
+
+
 @router.put("/vector-config")
 @router.put("/vector-config/")
 def update_vector_config(

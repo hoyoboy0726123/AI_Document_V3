@@ -15,7 +15,12 @@ from ...core.config import settings
 from ...core.security import get_current_user, get_current_admin_user
 from ...database import get_db
 from ...services import ai
-from ...services.documents import DocumentService, run_document_finalize_task, run_upload_analysis_task
+from ...services.documents import (
+    DocumentService,
+    run_document_finalize_task,
+    run_document_reocr_task,
+    run_upload_analysis_task,
+)
 from ...services.metadata import MetadataService
 from ...services.pdf_processing import extract_text_and_segments, suggest_keywords
 from ...services.pdf_image import get_pdf_page_count
@@ -1035,6 +1040,54 @@ def re_vectorize_document(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"重新向量化失敗：{str(exc)}"
         )
+
+
+@router.post("/{document_id}/reocr", response_model=schemas.TaskRead, status_code=status.HTTP_202_ACCEPTED)
+def reocr_document(
+    document_id: str,
+    background_tasks: BackgroundTasks,
+    payload: Optional[dict] = None,
+    db: Session = Depends(get_db),
+    current_admin=Depends(get_current_admin_user),
+):
+    """高精度重跑單份文件 OCR（預設 engine=rapid, tier=server）→ 重建 chunks + 重新向量化。
+
+    背景執行（server 等級在 CPU 上很慢，GPU 正式機才快）。前端 poll task 進度。
+    """
+    _ = current_admin
+    payload = payload or {}
+    engine = payload.get("engine") or "rapid"
+    tier = payload.get("tier") or "server"
+    if engine not in {"rapid", "pp_structure"}:
+        raise HTTPException(status_code=400, detail="engine must be rapid|pp_structure")
+    if tier not in {"mobile", "server"}:
+        raise HTTPException(status_code=400, detail="tier must be mobile|server")
+
+    doc_service = _doc_service(db)
+    document = _get_document_or_404(doc_service, document_id)
+    if not document.pdf_path or not Path(document.pdf_path).exists():
+        raise HTTPException(status_code=400, detail="此文件沒有可重跑的原始 PDF")
+
+    bg_task = models.BackgroundTask(
+        task_type="reocr",
+        status="pending",
+        progress=0,
+        message=f"等待高精度 OCR（{engine}/{tier}）開始...",
+        document_id=document.id,
+        creator_id=current_admin.id,
+    )
+    db.add(bg_task)
+    db.commit()
+    db.refresh(bg_task)
+
+    background_tasks.add_task(
+        run_document_reocr_task,
+        task_id=bg_task.id,
+        document_id=document.id,
+        ocr_engine=engine,
+        ocr_tier=tier,
+    )
+    return bg_task
 
 
 @router.get("/{document_id}/search-text", response_model=schemas.TextSearchResponse)

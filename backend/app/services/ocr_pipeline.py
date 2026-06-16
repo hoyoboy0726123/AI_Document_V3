@@ -492,8 +492,30 @@ def extract_image_pdf_blocks_isolated(pdf_path: str) -> List[Dict[str, Any]]:
     return normalize_ocr_blocks(all_blocks)
 
 
-def extract_image_pdf_blocks(pdf_path: str) -> List[Dict[str, Any]]:
-    """圖片型 PDF OCR：優先用 PP-StructureV3（表格→markdown），失敗則退回 PaddleOCR 純文字。"""
+def extract_image_pdf_blocks(
+    pdf_path: str,
+    *,
+    engine: Optional[str] = None,
+    tier: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """圖片型 PDF OCR。引擎由 OCR_ENGINE 決定（可用 engine= 覆寫）：
+
+    - rapid（預設）：輕量 onnx 三件套；快、無 paddle/segfault。失敗自動退回 PP-StructureV3。
+    - pp_structure：PaddleOCR PP-StructureV3（表格→markdown），再失敗退回 basic PaddleOCR 純文字。
+
+    tier= 可單次覆寫 rapid 後端的 OCR 等級（mobile/server），供高精度重跑使用。
+    """
+    chosen = (engine or getattr(settings, "OCR_ENGINE", "rapid") or "rapid").lower()
+    if chosen == "rapid":
+        try:
+            from .rapid_ocr import extract_image_pdf_blocks_rapid
+            blocks = extract_image_pdf_blocks_rapid(pdf_path, tier=tier)
+            if blocks:
+                return blocks
+            logger.warning("rapid OCR 未抽出任何內容，改用 PP-StructureV3 重試")
+        except Exception as exc:
+            logger.warning("rapid OCR 失敗，改用 PP-StructureV3：%s", exc)
+
     if PPStructureV3 is not None:
         try:
             if getattr(settings, "OCR_SUBPROCESS_ISOLATION", True):

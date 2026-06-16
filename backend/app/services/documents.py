@@ -323,6 +323,8 @@ class DocumentService:
         segments: Optional[List[Dict[str, Any]]] = None,
         force_vision: bool = False,
         force_ocr: bool = False,
+        ocr_engine: Optional[str] = None,
+        ocr_tier: Optional[str] = None,
     ) -> None:
         existing_chunks = (
             self.db.query(models.DocumentChunk)
@@ -348,7 +350,9 @@ class DocumentService:
                 self.db.commit()
 
                 try:
-                    ocr_blocks = extract_image_pdf_blocks(str(pdf_path))
+                    ocr_blocks = extract_image_pdf_blocks(
+                        str(pdf_path), engine=ocr_engine, tier=ocr_tier
+                    )
                     segments = [
                         {
                             "page": block.get("page"),
@@ -591,6 +595,63 @@ def run_document_finalize_task(
 
 # 保留舊名稱相容性
 run_vl_vectorize_task = run_document_finalize_task
+
+
+def run_document_reocr_task(
+    task_id: str,
+    document_id: str,
+    ocr_engine: str = "rapid",
+    ocr_tier: str = "server",
+) -> None:
+    """背景重跑單份文件的 OCR（高精度：預設 engine=rapid, tier=server），重建 chunks + 重新向量化。
+
+    用獨立 DB Session；對既有 pdf_path 重跑，不需重新上傳。
+    """
+    from ..database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        task = db.query(models.BackgroundTask).filter_by(id=task_id).first()
+        document = db.query(models.Document).filter_by(id=document_id).first()
+        if not task or not document:
+            return
+
+        pdf_path = getattr(document, "pdf_path", None)
+        if not pdf_path or not Path(pdf_path).exists():
+            task.status = "failed"
+            task.error = "找不到原始 PDF，無法重跑 OCR"
+            db.commit()
+            return
+
+        task.status = "running"
+        task.message = f"正在以 {ocr_engine}/{ocr_tier} 高精度重跑 OCR..."
+        db.commit()
+
+        service = DocumentService(db)
+        service._rebuild_document_chunks(
+            document,
+            Path(pdf_path),
+            segments=None,
+            force_ocr=True,
+            ocr_engine=ocr_engine,
+            ocr_tier=ocr_tier,
+        )
+
+        task.status = "completed"
+        task.progress = 100
+        task.message = f"高精度 OCR（{ocr_engine}/{ocr_tier}）重跑與向量化完成"
+        db.commit()
+    except Exception as exc:
+        try:
+            task = db.query(models.BackgroundTask).filter_by(id=task_id).first()
+            if task:
+                task.status = "failed"
+                task.error = str(exc)[:500]
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()
 
 
 def run_upload_analysis_task(task_id: str, file_path: str, filename: str) -> None:

@@ -208,6 +208,42 @@ class SystemConfigService:
                     self.set_config(key, value, desc)
         self.db.commit()
 
+    # ── OCR Engine ──
+
+    OCR_CONFIG_KEYS = (
+        "ocr.engine",
+        "ocr.model_tier",
+        "ocr.version",
+        "ocr.device",
+    )
+
+    def get_ocr_config(self) -> Dict[str, Any]:
+        """Read OCR engine config from DB (if any); caller merges with settings defaults."""
+        out: Dict[str, Any] = {}
+        for key in self.OCR_CONFIG_KEYS:
+            v = self.get_config(key)
+            if v is not None:
+                out[key] = v
+        return out
+
+    def update_ocr_config(self, payload: Dict[str, Any]) -> None:
+        """Update OCR engine keys. Only writes keys present in payload; empty → revert to default."""
+        for key, desc in (
+            ("ocr.engine", "OCR 引擎 (rapid|pp_structure)"),
+            ("ocr.model_tier", "OCR 模型等級 (mobile|server)"),
+            ("ocr.version", "OCR 版本 (PP-OCRv4|PP-OCRv5)"),
+            ("ocr.device", "OCR 裝置 (cpu|gpu)"),
+        ):
+            if key in payload:
+                value = payload[key]
+                if value is None or (isinstance(value, str) and value.strip() == ""):
+                    row = self.db.query(models.SystemConfig).filter(models.SystemConfig.key == key).first()
+                    if row:
+                        self.db.delete(row)
+                else:
+                    self.set_config(key, value, desc)
+        self.db.commit()
+
     def get_all_configs(self) -> Dict[str, Any]:
         """獲取所有配置"""
         configs = self.db.query(models.SystemConfig).all()
