@@ -1,47 +1,73 @@
 """
 Gemini / Google AI Studio implementation of LLMProvider.
 
-Uses the official `google-generativeai` SDK. Model IDs follow Google's naming
-(e.g. "gemini-2.5-flash", "gemma-3-27b-it") and are not normalized. If you
-specify an Ollama-style tag like "gemma4:e2b" against this provider, the API
-will return a 404 — that's a config error, not a runtime bug.
+Uses the current official `google-genai` SDK (`from google import genai`;
+`genai.Client(...).models.generate_content(...)`). The older
+`google-generativeai` package (genai.configure + GenerativeModel) is
+deprecated and is NOT used here.
+
+Model IDs follow Google's naming (e.g. "gemini-2.5-flash",
+"gemini-embedding-001") and are not normalized. If you specify an
+Ollama-style tag like "gemma4:e2b" against this provider, the API will
+return a 404 — that's a config error, not a runtime bug.
 """
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
 def _lazy_import():
-    """Import google.generativeai only when this provider is actually used."""
+    """Import the google-genai SDK only when this provider is actually used."""
     try:
-        import google.generativeai as genai  # type: ignore
-        return genai
+        from google import genai  # type: ignore
+        from google.genai import types as genai_types  # type: ignore
+        return genai, genai_types
     except ImportError as e:
         raise RuntimeError(
-            "google-generativeai not installed — run `uv add google-generativeai` "
-            "or switch LLM_PROVIDER back to 'ollama'."
+            "google-genai not installed — run `uv add google-genai` "
+            "(note: the package is `google-genai`, not the deprecated "
+            "`google-generativeai`), or switch LLM_PROVIDER back to 'ollama'."
         ) from e
 
 
-def _to_genai_messages(messages: List[Dict[str, Any]]) -> tuple[Optional[str], List[Dict[str, Any]]]:
-    """
-    Split out system message and convert remaining role/content pairs into
-    Gemini's [{role: user|model, parts: [str]}] format.
-    """
+def _split_messages(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+    """Split out the system message; return (system_instruction, role/content turns)."""
     system: Optional[str] = None
-    history: List[Dict[str, Any]] = []
+    turns: List[Dict[str, Any]] = []
     for msg in messages:
         role = (msg.get("role") or "").lower()
         content = msg.get("content") or ""
         if role == "system":
             system = (system + "\n\n" + content) if system else content
             continue
-        gemini_role = "user" if role == "user" else "model"
-        history.append({"role": gemini_role, "parts": [content]})
-    return system, history
+        turns.append({"role": role, "content": content})
+    return system, turns
+
+
+def _is_gemma(model: Optional[str]) -> bool:
+    """Gemma models on the Gemini API reject `system_instruction` (HTTP 400).
+
+    For them the system prompt must be folded into the user content instead.
+    """
+    return "gemma" in (model or "").lower()
+
+
+def _fold_system_for_gemma(
+    system: Optional[str], turns: List[Dict[str, Any]]
+) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+    """Prepend the system text to the first user turn; clear system_instruction."""
+    if not system or not turns:
+        return system, turns
+    folded = [dict(t) for t in turns]
+    for t in folded:
+        if (t.get("role") or "").lower() == "user":
+            t["content"] = f"{system}\n\n{t.get('content') or ''}"
+            return None, folded
+    # no user turn — drop system into a fresh leading user turn
+    return None, [{"role": "user", "content": system}] + folded
 
 
 class GeminiProvider:
@@ -61,15 +87,60 @@ class GeminiProvider:
         self._default_model = default_model
         self._embed_model = embed_model
         self._timeout = timeout
-        genai = _lazy_import()
-        genai.configure(api_key=api_key)
-        self._genai = genai
-
-    def _get_model(self, model: Optional[str], system_instruction: Optional[str] = None):
-        return self._genai.GenerativeModel(
-            model or self._default_model,
-            system_instruction=system_instruction,
+        genai, genai_types = _lazy_import()
+        self._types = genai_types
+        # http_options.timeout is in milliseconds in the google-genai SDK
+        self._client = genai.Client(
+            api_key=api_key,
+            http_options=genai_types.HttpOptions(timeout=timeout * 1000),
         )
+
+    # ---- internal helpers ----------------------------------------------------
+
+    def _build_config(
+        self,
+        *,
+        system_instruction: Optional[str],
+        format: Optional[Any],
+        options: Optional[Dict[str, Any]],
+    ):
+        kwargs: Dict[str, Any] = {}
+        if system_instruction:
+            kwargs["system_instruction"] = system_instruction
+        if format == "json":
+            kwargs["response_mime_type"] = "application/json"
+        if options:
+            for k_src, k_dst in (
+                ("temperature", "temperature"),
+                ("top_p", "top_p"),
+                ("top_k", "top_k"),
+                ("num_predict", "max_output_tokens"),
+                ("max_output_tokens", "max_output_tokens"),
+            ):
+                val = options.get(k_src)
+                if val is not None:
+                    kwargs[k_dst] = val
+        return self._types.GenerateContentConfig(**kwargs) if kwargs else None
+
+    def _turns_to_contents(self, turns: List[Dict[str, Any]]) -> List[Any]:
+        """Convert role/content turns to a list of genai Content objects.
+
+        Gemini roles are 'user' and 'model'; map assistant -> model.
+        """
+        contents: List[Any] = []
+        for turn in turns:
+            role = turn.get("role") or "user"
+            gem_role = "user" if role == "user" else "model"
+            text = turn.get("content") or ""
+            contents.append(
+                self._types.Content(
+                    role=gem_role,
+                    parts=[self._types.Part.from_text(text=text)],
+                )
+            )
+        return contents
+
+    # ---- LLMProvider interface ----------------------------------------------
 
     def chat(
         self,
@@ -79,35 +150,19 @@ class GeminiProvider:
         format: Optional[Any] = None,
         options: Optional[Dict[str, Any]] = None,
     ) -> str:
-        system, history = _to_genai_messages(messages)
-        gm = self._get_model(model, system_instruction=system)
-        # Pull last user turn as the "send" payload, rest as history
-        if history and history[-1]["role"] == "user":
-            send_parts = history[-1]["parts"]
-            prior = history[:-1]
-        else:
-            send_parts = [""]
-            prior = history
-
-        config: Dict[str, Any] = {}
-        if format == "json":
-            config["response_mime_type"] = "application/json"
-        if options:
-            for k_src, k_dst in (
-                ("temperature", "temperature"),
-                ("top_p", "top_p"),
-                ("top_k", "top_k"),
-                ("num_predict", "max_output_tokens"),
-            ):
-                if k_src in options and options[k_src] is not None:
-                    config[k_dst] = options[k_src]
-
-        chat = gm.start_chat(history=prior)
+        target = model or self._default_model
+        system, turns = _split_messages(messages)
+        if _is_gemma(target):
+            system, turns = _fold_system_for_gemma(system, turns)
+        contents = self._turns_to_contents(turns) or [
+            self._types.Content(role="user", parts=[self._types.Part.from_text(text="")])
+        ]
+        config = self._build_config(system_instruction=system, format=format, options=options)
         try:
-            resp = chat.send_message(
-                send_parts,
-                generation_config=config or None,
-                request_options={"timeout": self._timeout},
+            resp = self._client.models.generate_content(
+                model=target,
+                contents=contents,
+                config=config,
             )
         except Exception as e:
             logger.error("Gemini chat error: %s", e)
@@ -121,17 +176,20 @@ class GeminiProvider:
         model: Optional[str] = None,
         options: Optional[Dict[str, Any]] = None,
     ) -> Iterator[Dict[str, str]]:
-        system, history = _to_genai_messages(messages)
-        gm = self._get_model(model, system_instruction=system)
-        if history and history[-1]["role"] == "user":
-            send_parts = history[-1]["parts"]
-            prior = history[:-1]
-        else:
-            send_parts = [""]
-            prior = history
-        chat = gm.start_chat(history=prior)
+        target = model or self._default_model
+        system, turns = _split_messages(messages)
+        if _is_gemma(target):
+            system, turns = _fold_system_for_gemma(system, turns)
+        contents = self._turns_to_contents(turns) or [
+            self._types.Content(role="user", parts=[self._types.Part.from_text(text="")])
+        ]
+        config = self._build_config(system_instruction=system, format=None, options=options)
         try:
-            stream = chat.send_message(send_parts, stream=True)
+            stream = self._client.models.generate_content_stream(
+                model=target,
+                contents=contents,
+                config=config,
+            )
             for chunk in stream:
                 text = getattr(chunk, "text", None)
                 if text:
@@ -150,33 +208,32 @@ class GeminiProvider:
         format: Optional[Any] = None,
         options: Optional[Dict[str, Any]] = None,
     ) -> str:
-        gm = self._get_model(model, system_instruction=system)
-        parts: List[Any] = [prompt] if prompt else []
+        target = model or self._default_model
+        if _is_gemma(target) and system:
+            prompt = f"{system}\n\n{prompt or ''}"
+            system = None
+        parts: List[Any] = []
+        if prompt:
+            parts.append(self._types.Part.from_text(text=prompt))
         if images:
-            # images expected as base64 strings (same shape as Ollama API)
+            # images expected as base64 strings (same shape as the Ollama API)
             import base64
             for b64 in images:
                 try:
                     raw = base64.b64decode(b64)
-                    parts.append({"mime_type": "image/jpeg", "data": raw})
+                    parts.append(self._types.Part.from_bytes(data=raw, mime_type="image/jpeg"))
                 except Exception:
                     continue
+        if not parts:
+            parts = [self._types.Part.from_text(text="")]
 
-        config: Dict[str, Any] = {}
-        if format == "json":
-            config["response_mime_type"] = "application/json"
-        if options:
-            for k_src, k_dst in (
-                ("temperature", "temperature"),
-                ("top_p", "top_p"),
-                ("top_k", "top_k"),
-                ("num_predict", "max_output_tokens"),
-            ):
-                if k_src in options and options[k_src] is not None:
-                    config[k_dst] = options[k_src]
-
+        config = self._build_config(system_instruction=system, format=format, options=options)
         try:
-            resp = gm.generate_content(parts, generation_config=config or None)
+            resp = self._client.models.generate_content(
+                model=target,
+                contents=[self._types.Content(role="user", parts=parts)],
+                config=config,
+            )
         except Exception as e:
             logger.error("Gemini generate error: %s", e)
             raise RuntimeError(f"Gemini API 錯誤：{e}") from e
@@ -188,24 +245,29 @@ class GeminiProvider:
         *,
         model: Optional[str] = None,
     ) -> List[List[float]]:
-        out: List[List[float]] = []
         target = model or self._embed_model
+        cfg = self._types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT")
+        out: List[List[float]] = []
         for text in inputs:
             try:
-                resp = self._genai.embed_content(
+                resp = self._client.models.embed_content(
                     model=target,
-                    content=(text or "")[:8000],
-                    task_type="retrieval_document",
+                    contents=(text or "")[:8000],
+                    config=cfg,
                 )
             except Exception as e:
                 logger.error("Gemini embed error: %s", e)
                 raise RuntimeError(f"Gemini embed 錯誤：{e}") from e
-            out.append(resp["embedding"])
+            # resp.embeddings is a list of ContentEmbedding; one per input string
+            embeddings = getattr(resp, "embeddings", None) or []
+            if not embeddings:
+                raise RuntimeError("Gemini embed 回傳空向量")
+            out.append(list(embeddings[0].values))
         return out
 
     def list_models(self) -> List[Dict[str, Any]]:
         try:
-            return [{"name": m.name} for m in self._genai.list_models()]
+            return [{"name": m.name} for m in self._client.models.list()]
         except Exception as e:
             logger.warning("Gemini list_models failed: %s", e)
             return []

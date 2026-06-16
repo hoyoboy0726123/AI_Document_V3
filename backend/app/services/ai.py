@@ -109,6 +109,35 @@ def _chat_with_ollama(
     return result
 
 
+def _chat_with_provider(
+    messages: List[Dict[str, Any]],
+    *,
+    model: Optional[str] = None,
+    response_format: Optional[Any] = None,
+    think: bool = False,
+) -> str:
+    """Provider-aware chat: honour the configured LLM_PROVIDER.
+
+    Ollama keeps its existing path verbatim (including the `think` flag, which
+    is Ollama-specific). Any cloud provider (e.g. Gemini) goes through the
+    provider abstraction so switching providers in admin/.env actually routes
+    RAG synthesis there instead of always hitting Ollama.
+    """
+    from .llm_provider import get_llm_provider
+
+    provider = get_llm_provider()
+    if getattr(provider, "name", "ollama") == "ollama":
+        return _chat_with_ollama(
+            messages, model=model, response_format=response_format, think=think
+        )
+    import time
+    t0 = time.time()
+    result = provider.chat(messages, model=model, format=response_format)
+    logger.info("_chat_with_provider provider=%s elapsed=%.1fs output_len=%d preview=%s",
+                provider.name, time.time() - t0, len(result), repr(result[:120]))
+    return result
+
+
 def _prepare_history(conversation_history: Optional[List[Dict[str, str]]]) -> List[Dict[str, str]]:
     # Local light-weight sanitizer to avoid leaking control tokens into prompts
     import re as _re
@@ -324,7 +353,7 @@ def generate_rag_answer(
         return '查無足夠的相關內容，請提供更多文件或調整問題。'
 
     messages = _build_rag_messages(question, context_blocks, conversation_history, system_prompt, user_template)
-    return _chat_with_ollama(messages, think=True)
+    return _chat_with_provider(messages, think=True)
 
 
 def generate_rag_answer_stream(
@@ -340,9 +369,15 @@ def generate_rag_answer_stream(
         return
 
     messages = _build_rag_messages(question, context_blocks, conversation_history, system_prompt, user_template)
-    client = get_client()
-    for chunk in client.chat_stream(messages, model=settings.OLLAMA_LLM_MODEL, think=True):
-        yield chunk
+    from .llm_provider import get_llm_provider
+    provider = get_llm_provider()
+    if getattr(provider, "name", "ollama") == "ollama":
+        client = get_client()
+        for chunk in client.chat_stream(messages, model=settings.OLLAMA_LLM_MODEL, think=True):
+            yield chunk
+    else:
+        for chunk in provider.chat_stream(messages):
+            yield chunk
 
 
 _EMBED_MAX_CHARS = 7000  # qwen3-embedding:8b supports 8192 tokens (~7000 English chars)
