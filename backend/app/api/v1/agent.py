@@ -49,6 +49,7 @@ def agent_chat(
         db = SessionLocal()
         try:
             final_text = ""
+            final_sources = []
             for evt in agent.run_agent(
                 db,
                 question,
@@ -58,7 +59,8 @@ def agent_chat(
                 etype = evt.get("type")
                 if etype == "final":
                     final_text = evt.get("text") or ""
-                    yield _sse("final", {"text": final_text, "sources": evt.get("sources") or []})
+                    final_sources = evt.get("sources") or []
+                    yield _sse("final", {"text": final_text, "sources": final_sources})
                 elif etype == "error":
                     yield _sse("error", {"message": evt.get("message")})
                 else:
@@ -75,7 +77,11 @@ def agent_chat(
                 entry = {
                     "question": question,
                     "answer": final_text,
+                    # 持久化 sources，否則重整頁面後從 DB 載回的訊息沒有來源
+                    # → 前端「預覽 / 儲存筆記」消失（兩者都看 msg.sources）。
+                    "sources": final_sources,
                     "mode": "agent",
+                    "agentMode": True,
                     "timestamp": datetime.utcnow().isoformat(),
                 }
                 if row:
