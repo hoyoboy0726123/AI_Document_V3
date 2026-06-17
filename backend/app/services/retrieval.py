@@ -79,14 +79,20 @@ def expand_chunk_text(db: Session, chunk, *, radius: int, max_chars: int) -> str
 
 
 def context_text_budgeted(db: Session, chunk, ctx_used: int) -> str:
-    """在「總 context 預算」內做鄰塊擴展；預算用完就退回原始小塊，避免超過 num_ctx。"""
+    """在「總 context 預算」內做鄰塊擴展。
+
+    關鍵：預算用完時必須「截斷到剩餘額度」(或回空)，不能回傳整塊——否則多塊加總會
+    超過 num_ctx，導致模型(如 gemma)吃到溢出的 prompt 而吐空，最後落到「暫無足夠資訊」。
+    """
     base = chunk.text or ""
-    radius = getattr(settings, "RAG_NEIGHBOR_RADIUS", 1)
-    per_cap = getattr(settings, "RAG_EXPAND_MAX_CHARS", 2000)
     total_budget = ai.effective_rag_budget()
     remaining = total_budget - ctx_used
+    if remaining <= 0:
+        return ""  # 預算已用完：不再塞，避免 prompt 溢出 num_ctx
+    radius = getattr(settings, "RAG_NEIGHBOR_RADIUS", 1)
+    per_cap = getattr(settings, "RAG_EXPAND_MAX_CHARS", 2000)
     if radius <= 0 or remaining <= len(base):
-        return base
+        return base[:remaining]  # 截斷到剩餘額度（原本回傳整塊 → 溢出 bug）
     return expand_chunk_text(db, chunk, radius=radius, max_chars=min(per_cap, remaining))
 
 
