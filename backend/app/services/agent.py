@@ -385,6 +385,53 @@ def _seed_evidence_via_rag(db: Session, question: str, top_k: int = 5) -> tuple:
     return evidence, confidence
 
 
+def _build_enumeration_answer(db: Session, chosen: Dict[str, Any], rag_evidence, conversation_history):
+    """用 KG 的權威完整子項清單組裝「確定性列舉答案」(body, sources)，不經會漏項的 grounded 合成。
+
+    grounded 合成受 num_ctx 預算限制，6 個子項會被截到只展開前 2 個；列舉題要的是「完整列出」，
+    所以直接照 KG 結構列全部，再附一段整體摘要說明（摘要才用合成）。
+    """
+    lines = [f"「{chosen['matched']}」共有 {len(chosen['subitems'])} 個子項目："]
+    enum_sources: List[Dict[str, Any]] = []
+    for it in chosen["subitems"]:
+        num = it.get("number")
+        lines.append(f"- {(str(num) + ' ') if num else ''}{it.get('name', '')}")
+        if it.get("document_id"):
+            enum_sources.append({
+                "document_id": it.get("document_id"),
+                "title": it.get("name", ""),
+                "page": it.get("page"),
+                "snippet": f"{(str(num) + ' ') if num else ''}{it.get('name', '')}",
+                "score": None,
+            })
+    if chosen.get("references"):
+        lines.append(f"\n引用標準：{'、'.join(chosen['references'])}")
+    lines.append("\n（以上為知識圖譜結構的完整列舉）")
+    body = "\n".join(lines)
+
+    # 不只列清單：再用檢索內容對這組測試做摘要說明（這段才用合成，漏不漏項不影響清單完整性）。
+    evidence_for_summary = list(rag_evidence or [])
+    if not evidence_for_summary:
+        try:
+            rs = agent_tools.run_tool(db, "rag_search", {"query": chosen["matched"], "top_k": 5})
+            if isinstance(rs, dict):
+                evidence_for_summary = rs.get("results", []) or []
+        except Exception:
+            evidence_for_summary = []
+    if evidence_for_summary:
+        try:
+            sq = (
+                f"請用 2~4 句話摘要說明「{chosen['matched']}」這組測試整體在測試什麼、目的為何，"
+                "以段落呈現；不要再列出子項目清單。"
+            )
+            s_ans, _s, _u, _t = _grounded_synthesis(db, sq, evidence_for_summary, [], conversation_history)
+            if s_ans and s_ans.strip():
+                body += f"\n\n📝 摘要說明：\n{s_ans.strip()}"
+        except Exception as e:
+            logger.warning("enumeration summary failed: %s", e)
+    return body, enum_sources
+
+
 def run_agent(
     db: Session,
     question: str,
@@ -400,7 +447,27 @@ def run_agent(
       {"type": "final", "text": str}
       {"type": "error", "message": str}
     """
-    # 結構性問題（列舉 / 逐項細節 / 概覽）：用 KG 把「全部子項內容」撈齊(保證完整、含關鍵字漏撈的子項)，
+    # 純列舉題（「有哪些子項目 / 列出全部」且非規格/判定/目的等細節面向）→ 直接用 KG 確定性完整列舉。
+    # 不走下方 _structural_evidence 的 grounded 合成：合成受 num_ctx 預算限制會漏項（6 子項只展開 2 個）。
+    if _looks_like_enumeration(question) and _detect_aspect(question) is None:
+        try:
+            fb = agent_tools.run_tool(db, "list_subitems", {"name": question})
+        except Exception as e:
+            logger.warning("enumeration list_subitems failed: %s", e)
+            fb = None
+        if isinstance(fb, dict) and fb.get("subitems"):
+            yield {"type": "thought", "step": 0,
+                   "text": f"偵測到列舉題：用知識圖譜完整列出「{fb.get('matched')}」全部子項目。"}
+            body, esrc = _build_enumeration_answer(
+                db,
+                {"matched": fb.get("matched"), "subitems": fb.get("subitems"),
+                 "references": fb.get("references") or []},
+                None, conversation_history,
+            )
+            yield {"type": "final", "text": body, "sources": esrc}
+            return
+
+    # 結構性問題（逐項細節 / 概覽）：用 KG 把「全部子項內容」撈齊(保證完整、含關鍵字漏撈的子項)，
     # 再交給 RAG grounded 合成由 LLM 產生最完整、有引用的答案 —— 不用套版直接回傳。
     try:
         struct = _structural_evidence(db, question, conversation_history)
@@ -607,46 +674,7 @@ def run_agent(
             }
 
     if chosen:
-        lines = [f"「{chosen['matched']}」共有 {len(chosen['subitems'])} 個子項目："]
-        enum_sources: List[Dict[str, Any]] = []
-        for it in chosen["subitems"]:
-            num = it.get("number")
-            lines.append(f"- {(str(num) + ' ') if num else ''}{it.get('name', '')}")
-            if it.get("document_id"):
-                enum_sources.append({
-                    "document_id": it.get("document_id"),
-                    "title": it.get("name", ""),
-                    "page": it.get("page"),
-                    "snippet": f"{(str(num) + ' ') if num else ''}{it.get('name', '')}",
-                    "score": None,
-                })
-        if chosen.get("references"):
-            lines.append(f"\n引用標準：{'、'.join(chosen['references'])}")
-        lines.append("\n（以上為知識圖譜結構的完整列舉）")
-        body = "\n".join(lines)
-
-        # 不只列清單：再用檢索到的內容對這組測試做摘要說明，回答「這些在測什麼」。
-        # 若這一輪沒有 rag 證據（例如直接走 fallback），就主動檢索一次以確保有摘要。
-        evidence_for_summary = list(rag_evidence)
-        if not evidence_for_summary:
-            try:
-                rs = agent_tools.run_tool(db, "rag_search", {"query": chosen["matched"], "top_k": 5})
-                if isinstance(rs, dict):
-                    evidence_for_summary = rs.get("results", []) or []
-            except Exception:
-                evidence_for_summary = []
-        if evidence_for_summary:
-            try:
-                sq = (
-                    f"請用 2~4 句話摘要說明「{chosen['matched']}」這組測試整體在測試什麼、目的為何，"
-                    "以段落呈現；不要再列出子項目清單。"
-                )
-                s_ans, _s, _u, _t = _grounded_synthesis(db, sq, evidence_for_summary, [], conversation_history)
-                if s_ans and s_ans.strip():
-                    body += f"\n\n📝 摘要說明：\n{s_ans.strip()}"
-            except Exception as e:
-                logger.warning("enumeration summary failed: %s", e)
-
+        body, enum_sources = _build_enumeration_answer(db, chosen, rag_evidence, conversation_history)
         yield {"type": "final", "text": body, "sources": enum_sources}
         return
 
