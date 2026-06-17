@@ -173,7 +173,6 @@ def generate_document_suggestion(
     segments: Optional[List[Dict[str, Any]]] = None,
     max_text_chars: int = 8000,
 ) -> Dict[str, Any]:
-    client = get_client()
     truncated_text = (text or "").strip()[:max_text_chars]
 
     segments_summary = []
@@ -207,10 +206,9 @@ Important segments:
 Return a JSON object strictly following the provided schema.
 """
 
-    raw_response = client.chat(
+    raw_response = _chat_with_provider(
         [{"role": "user", "content": prompt}],
-        model=settings.OLLAMA_LLM_MODEL,
-        format=DOCUMENT_SUGGESTION_SCHEMA,
+        response_format=DOCUMENT_SUGGESTION_SCHEMA,
     )
     payload = _safe_json_loads(raw_response)
 
@@ -440,23 +438,26 @@ _EMBED_MAX_CHARS = 7000  # qwen3-embedding:8b supports 8192 tokens (~7000 Englis
 _EMBED_BATCH_SIZE = 10   # process N chunks per request to avoid timeout
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
+    """經 embedding provider 抽象產生向量，受 EMBEDDING_PROVIDER 設定支配。
+
+    預設 ollama（行為與舊版一致，用 OLLAMA_EMBED_MODEL）。注意：切換 embedding 後端
+    （例如 gemini）會改變向量維度，與既有 FAISS 索引不相容，需重新向量化所有文件。
+    """
     if not texts:
         return []
 
-    client = get_client()
+    from .llm_provider import get_embedding_provider
+
+    provider = get_embedding_provider()
     truncated = [t[:_EMBED_MAX_CHARS] for t in texts]
 
     all_embeddings: List[List[float]] = []
     for i in range(0, len(truncated), _EMBED_BATCH_SIZE):
         batch = truncated[i:i + _EMBED_BATCH_SIZE]
-        batch_embeddings = client.embed(
-            batch,
-            model=settings.OLLAMA_EMBED_MODEL,
-        )
-        all_embeddings.extend(batch_embeddings)
+        all_embeddings.extend(provider.embed(batch))
 
     if len(all_embeddings) != len(texts):
-        raise RuntimeError("Ollama 回傳的 embedding 數量與輸入不符")
+        raise RuntimeError("embedding 數量與輸入不符")
     return all_embeddings
 
 
@@ -506,7 +507,7 @@ Examples:
 Return JSON strictly following the schema.
 """
 
-    raw = _chat_with_ollama(
+    raw = _chat_with_provider(
         [{"role": "user", "content": prompt}],
         response_format=FOLLOWUP_INTENT_SCHEMA,
     )
@@ -531,7 +532,7 @@ def generate_suggested_questions(context: str, answered_question: str) -> List[s
 請只回傳 JSON 陣列格式，如：
 ["問題 1","問題 2","問題 3"]
 """
-    raw = _chat_with_ollama(
+    raw = _chat_with_provider(
         [{"role": "user", "content": prompt}],
         response_format=SUGGESTED_QUESTION_SCHEMA,
     )
@@ -548,7 +549,7 @@ def generate_fallback_answer(question: str) -> str:
 
 問題：{question}
 """
-    return _chat_with_ollama([
+    return _chat_with_provider([
         {"role": "system", "content": "請以繁體中文（台灣）作答，嚴格禁止簡體中文。避免輸出控制標記或思考過程。"},
         {"role": "user", "content": prompt},
     ])
@@ -793,7 +794,7 @@ def finalize_text_answer(notes: str, question: Optional[str] = None) -> str:
         {"role": "system", "content": system},
         {"role": "user", "content": task},
     ]
-    return _chat_with_ollama(messages, model=settings.OLLAMA_LLM_MODEL)
+    return _chat_with_provider(messages)
 
 def analyze_pdf_page_images(
     image_bytes_list: List[bytes],
