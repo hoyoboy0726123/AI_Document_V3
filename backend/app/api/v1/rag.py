@@ -12,174 +12,31 @@ from ... import models, schemas
 from ...core.config import settings
 from ...core.security import get_current_user
 from ...database import get_db
-from ...services import ai, pdf_image, hybrid_search, rerank
+from ...services import ai, pdf_image, rerank, retrieval
 from ...services.system_config import SystemConfigService
 
 
 router = APIRouter()
 
 
-def _project_matches(metadata: Dict[str, object], project_id: str) -> bool:
-    value = (metadata or {}).get("project_id")
-    if value is None:
-        return False
-    if isinstance(value, list):
-        return project_id in value
-    return value == project_id
-
-
-def _join_dedup(a: str, b: str, max_overlap: int = 400) -> str:
-    """串接 a+b，並裁掉 a 結尾與 b 開頭重複的部分（相鄰塊本來就有 overlap）。"""
-    if not a:
-        return b
-    if not b:
-        return a
-    limit = min(len(a), len(b), max_overlap)
-    for k in range(limit, 20, -1):
-        if a[-k:] == b[:k]:
-            return a + b[k:]
-    return a + "\n" + b
-
-
-def _expand_chunk_text(db: Session, chunk, *, radius: int, max_chars: int) -> str:
-    """小找大：回傳「命中塊 + 同文件前後 radius 塊」合併去重後的完整上下文。
-
-    搜尋精度仍用小塊（向量比對的是命中塊），但餵給 LLM 的是補上鄰塊的大塊，
-    避免句子/數值被切塊邊界截斷（如「允收標準：」與「1.5G RMS」被切成兩塊）。
-    """
-    base = chunk.text or ""
-    if radius <= 0 or len(base) >= max_chars:
-        return base[:max_chars]
-    rows = (
-        db.query(models.DocumentChunk)
-        .filter(
-            models.DocumentChunk.document_id == chunk.document_id,
-            models.DocumentChunk.chunk_index >= chunk.chunk_index - radius,
-            models.DocumentChunk.chunk_index <= chunk.chunk_index + radius,
-        )
-        .order_by(models.DocumentChunk.chunk_index)
-        .all()
+def _hybrid_filtered(db, payload, search_query, embedding, vector_config, top_k):
+    """Thin adapter → services.retrieval.hybrid_retrieve（檢索邏輯的唯一實作）。"""
+    return retrieval.hybrid_retrieve(
+        db, search_query, embedding, top_k,
+        vector_config=vector_config,
+        document_id=payload.document_id,
+        classification_id=payload.classification_id,
+        project_id=payload.project_id,
+        folder_ids=payload.folder_ids,
     )
-    if len(rows) <= 1:
-        return base
-    # 命中塊「完整保留」，鄰塊只填剩餘預算（否則前一塊會把命中塊擠掉、害表格被截尾，
-    # 例如查 101.78 卻只看到表格前兩列）。後鄰取其開頭（接續），前鄰取其結尾（最靠近命中）。
-    hi = chunk.chunk_index
-    nxt = next((r.text or "" for r in rows if r.chunk_index == hi + 1), "")
-    prv = next((r.text or "" for r in rows if r.chunk_index == hi - 1), "")
-    result = base
-    rem = max_chars - len(result)
-    if rem > 0 and nxt:
-        result = _join_dedup(result, nxt[:rem])
-    rem = max_chars - len(result)
-    if rem > 0 and prv:
-        result = _join_dedup(prv[-rem:], result)
-    return result[:max_chars]
-
-
-def _context_text_budgeted(db: Session, chunk, ctx_used: int) -> str:
-    """在「總 context 預算」內做鄰塊擴展；預算用完就退回原始小塊，避免超過 num_ctx。"""
-    base = chunk.text or ""
-    radius = getattr(settings, "RAG_NEIGHBOR_RADIUS", 1)
-    per_cap = getattr(settings, "RAG_EXPAND_MAX_CHARS", 2000)
-    total_budget = ai.effective_rag_budget()
-    remaining = total_budget - ctx_used
-    if radius <= 0 or remaining <= len(base):
-        return base
-    return _expand_chunk_text(db, chunk, radius=radius, max_chars=min(per_cap, remaining))
-
-
-_PAGE_GAP = 5
 
 
 def _context_keep_ids(filtered):
-    """智慧頁距過濾 + 塌縮保護：回傳應納入 LLM context 的 chunk id 集合。
-
-    原本固定的頁距過濾（離主命中 ±5 頁）在「主命中是離群/索引頁，或命中本來就分散」時，
-    會把 context 塌縮到極少甚至只剩 1 塊（例如最高分命中落在修訂紀錄頁，真正內容頁全被丟掉）。
-    這裡只在「多數命中本來就集中在主命中附近」時才套用；否則（分散/離群）不套用、全部納入。
-    """
-    if not filtered:
-        return set()
-    primary = filtered[0][0]
-    pp = primary.page or 0
-    pid = primary.document_id
-
-    def _near(c):
-        if c.document_id != pid or not pp or not c.page:
-            return True
-        return abs(c.page - pp) <= _PAGE_GAP
-
-    near_ids = {c.id for c, _ in filtered if _near(c)}
-    if len(near_ids) >= max(2, (len(filtered) + 1) // 2):
-        base = near_ids  # 命中集中 → 套用頁距過濾，維持單主題一致性
-    else:
-        base = {c.id for c, _ in filtered}  # 命中分散/主命中離群 → 不過濾，全部納入
-
-    # 餵進 LLM 的塊數上限：依排序取前 N，避免分散的 hybrid 命中塞爆/破碎 context 導致生成退化。
-    # 超出的塊仍會出現在 sources（前端可預覽），只是不進 LLM。
-    cap = getattr(settings, "RAG_MAX_CONTEXT_CHUNKS", 6)
-    ordered_kept = [c.id for c, _ in filtered if c.id in base][:cap]
-    return set(ordered_kept)
+    return retrieval.context_keep_ids(filtered)
 
 
-def _hybrid_filtered(db, payload, search_query, embedding, vector_config, top_k):
-    """混合檢索（向量 + BM25，RRF 融合）後，套用文件/分類/專案/資料夾過濾，回傳 [(chunk, score)]。
-
-    與舊純向量流程相容：回傳的 tuple 形狀不變，下游 page-gap / context 完全沿用。
-    關鍵差異：keyword-only 命中（向量相似度低於門檻但關鍵字命中）不被向量門檻砍掉，
-    這正是把「靠關鍵字才找得到的分散子項目」撈回來的機制。
-    """
-    candidate_k = top_k * vector_config["search_multiplier"]
-    fused, kw_hits = hybrid_search.fuse(db, search_query, embedding, candidate_k)
-    if not fused:
-        return []
-
-    faiss_ids = [fid for fid, _ in fused]
-    chunk_rows = (
-        db.query(models.DocumentChunk)
-        .join(models.Document, models.DocumentChunk.document_id == models.Document.id)
-        .filter(models.DocumentChunk.faiss_id.in_(faiss_ids))
-        .all()
-    )
-    chunk_map = {c.faiss_id: c for c in chunk_rows}
-    min_sim = vector_config["min_similarity_score"]
-
-    # 撈寬：先收集一個較大的候選池（供 rerank 精選），rerank 關閉時退回只收 top_k。
-    rerank_on = getattr(settings, "RAG_RERANK", True)
-    pool_size = max(top_k, getattr(settings, "RAG_RERANK_POOL", 12)) if rerank_on else top_k
-
-    pool = []
-    seen_pages = set()  # 同頁去重：保留 RRF 最高的那一塊，避免重複頁稀釋 context
-    for fid, vscore in fused:
-        chunk = chunk_map.get(fid)
-        if not chunk:
-            continue
-        # 相關性門檻：向量低分「且非關鍵字命中」才丟棄；keyword-only 命中放行
-        if vscore is not None and vscore < min_sim and fid not in kw_hits:
-            continue
-        doc = chunk.document
-        if payload.document_id and doc.id != payload.document_id:
-            continue
-        if payload.classification_id and doc.classification_id != payload.classification_id:
-            continue
-        if payload.project_id and not _project_matches(doc.metadata_data or {}, payload.project_id):
-            continue
-        if payload.folder_ids and doc.folder_id not in payload.folder_ids:
-            continue
-        page_key = (doc.id, chunk.page)
-        if chunk.page is not None and page_key in seen_pages:
-            continue
-        seen_pages.add(page_key)
-        # 顯示用分數：有向量分用向量分；keyword-only 命中以 0.0 佔位（前端仍可預覽內容）
-        pool.append((chunk, vscore if vscore is not None else 0.0))
-        if len(pool) >= pool_size:
-            break
-
-    if not rerank_on or len(pool) <= 1:
-        return pool[:top_k]
-    # 撈寬再精選：把垃圾頁踢掉、乾淨規格段排前，再取 top_k
-    return rerank.rerank(search_query, pool, top_k)
+def _context_text_budgeted(db: Session, chunk, ctx_used: int) -> str:
+    return retrieval.context_text_budgeted(db, chunk, ctx_used)
 
 
 @router.post("/query", response_model=schemas.RAGQueryResponse)

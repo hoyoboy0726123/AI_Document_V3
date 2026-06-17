@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from ..core.config import settings
-from . import ai, hybrid_search, kg_service, rerank
+from . import ai, kg_service, retrieval
 
 logger = logging.getLogger(__name__)
 
@@ -36,44 +36,6 @@ class Tool:
 # ───── Tool implementations ────────────────────────────────────────────────
 
 
-def _join_dedup(a: str, b: str, max_overlap: int = 400) -> str:
-    """串接 a+b，裁掉 a 結尾與 b 開頭重複的部分（相鄰塊本來就有 overlap）。"""
-    if not a:
-        return b
-    if not b:
-        return a
-    limit = min(len(a), len(b), max_overlap)
-    for k in range(limit, 20, -1):
-        if a[-k:] == b[:k]:
-            return a + b[k:]
-    return a + "\n" + b
-
-
-def _expand_neighbor_text(db: Session, chunk, radius: int, max_chars: int) -> str:
-    """小找大：命中塊 + 同文件前後 radius 塊，合併去重（與 RAG /query 一致，帶上下頁脈絡）。"""
-    base = chunk.text or ""
-    if radius <= 0:
-        return base[:max_chars]
-    rows = (
-        db.query(models.DocumentChunk)
-        .filter(
-            models.DocumentChunk.document_id == chunk.document_id,
-            models.DocumentChunk.chunk_index >= chunk.chunk_index - radius,
-            models.DocumentChunk.chunk_index <= chunk.chunk_index + radius,
-        )
-        .order_by(models.DocumentChunk.chunk_index)
-        .all()
-    )
-    if len(rows) <= 1:
-        return base[:max_chars]
-    merged = ""
-    for r in rows:
-        merged = _join_dedup(merged, r.text or "")
-        if len(merged) >= max_chars:
-            break
-    return merged[:max_chars]
-
-
 def _tool_rag_search(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
     query = str(params.get("query") or "").strip()
     if not query:
@@ -85,45 +47,11 @@ def _tool_rag_search(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
     if not embeddings:
         return {"error": "embedding failed"}
 
-    # 與 RAG /query 一致：向量 + BM25 RRF 融合 → cross-encoder 精選。
-    # （Agent 為全域搜尋，不做 document/分類過濾。）
-    candidate_k = top_k * 4
-    fused, kw_hits = hybrid_search.fuse(db, query, embeddings[0], candidate_k)
-    if not fused:
+    # 與 /rag/query 共用同一條檢索（services.retrieval，檢索邏輯的唯一實作）。
+    # Agent 為全域搜尋，不做 document/分類過濾。
+    selected = retrieval.hybrid_retrieve(db, query, embeddings[0], top_k)
+    if not selected:
         return {"results": []}
-
-    faiss_ids = [fid for fid, _ in fused]
-    chunk_rows = (
-        db.query(models.DocumentChunk)
-        .join(models.Document, models.DocumentChunk.document_id == models.Document.id)
-        .filter(models.DocumentChunk.faiss_id.in_(faiss_ids))
-        .all()
-    )
-    chunk_map = {c.faiss_id: c for c in chunk_rows}
-
-    min_sim = 0.25
-    rerank_on = getattr(settings, "RAG_RERANK", True)
-    pool_size = max(top_k, getattr(settings, "RAG_RERANK_POOL", 12)) if rerank_on else top_k
-
-    pool: List[tuple] = []
-    seen_pages = set()
-    for fid, vscore in fused:
-        chunk = chunk_map.get(fid)
-        if not chunk:
-            continue
-        # keyword-only 命中放行；向量低分且非關鍵字命中才丟棄
-        if vscore is not None and vscore < min_sim and fid not in kw_hits:
-            continue
-        doc = chunk.document
-        page_key = (doc.id, chunk.page)
-        if chunk.page is not None and page_key in seen_pages:
-            continue
-        seen_pages.add(page_key)
-        pool.append((chunk, vscore if vscore is not None else 0.0))
-        if len(pool) >= pool_size:
-            break
-
-    selected = rerank.rerank(query, pool, top_k) if (rerank_on and len(pool) > 1) else pool[:top_k]
 
     radius = getattr(settings, "RAG_NEIGHBOR_RADIUS", 1)
     expand_cap = getattr(settings, "RAG_EXPAND_MAX_CHARS", 2000)
@@ -135,9 +63,8 @@ def _tool_rag_search(db: Session, params: Dict[str, Any]) -> Dict[str, Any]:
             "title": doc.title,
             "page": chunk.page,
             "score": round(score, 4),
-            # 小找大：帶同文件前後鄰塊（與 RAG /query 一致），讓上下頁脈絡不被切塊邊界截斷。
-            # snippet 同時用於 ReAct 推理與最後的 grounded 合成引用。
-            "snippet": _expand_neighbor_text(db, chunk, radius, expand_cap),
+            # 小找大：命中塊完整保留 + 鄰塊填補（與 RAG /query 一致），snippet 供 ReAct 推理與合成引用。
+            "snippet": retrieval.expand_chunk_text(db, chunk, radius=radius, max_chars=expand_cap),
         })
     return {"results": out}
 

@@ -352,35 +352,28 @@ def _structural_evidence(db: Session, question: str, conversation_history) -> Op
 
 
 def _seed_evidence_via_rag(db: Session, question: str, top_k: int = 5) -> tuple:
-    """用「使用者原始問題」跑 /rag/query 完全相同的檢索，回傳 (evidence, confidence)。
+    """用「使用者原始問題」跑與 /rag/query 完全相同的檢索，回傳 (evidence, confidence)。
 
-    刻意重用 rag.py 的 _hybrid_filtered / _context_keep_ids / _context_text_budgeted，
-    讓 Agent 的基準證據與 RAG 模式逐字一致（已驗證對地端與雲端都能撈到正確的表格段）。
+    走 services.retrieval（檢索邏輯的唯一實作），讓 Agent 的基準證據與 RAG 模式逐字一致
+    （已驗證對地端與雲端都能撈到正確的表格段）。
     confidence = 最相關段落的 cross-encoder 分數（None 表示 CE 不可用）。
     """
-    import types as _types
-    from . import rerank
-    from ..api.v1 import rag as rag_api  # lazy import to avoid import cycle
+    from . import rerank, retrieval
 
     embeddings = ai.embed_texts([question])
     if not embeddings:
         return [], None
-    cfg = SystemConfigService(db).get_vector_config()
-    payload = _types.SimpleNamespace(
-        question=question, top_k=top_k, document_id=None, classification_id=None,
-        project_id=None, folder_ids=None,
-    )
-    filtered = rag_api._hybrid_filtered(db, payload, question, embeddings[0], cfg, top_k)
+    filtered = retrieval.hybrid_retrieve(db, question, embeddings[0], top_k)
     if not filtered:
         return [], None
     confidence = rerank.top_relevance(question, [c for c, _ in filtered])
-    keep_ids = rag_api._context_keep_ids(filtered)
+    keep_ids = retrieval.context_keep_ids(filtered)
     evidence: List[Dict[str, Any]] = []
     ctx_used = 0
     for chunk, score in filtered:
         if chunk.id not in keep_ids:
             continue
-        text = rag_api._context_text_budgeted(db, chunk, ctx_used)
+        text = retrieval.context_text_budgeted(db, chunk, ctx_used)
         ctx_used += len(text)
         evidence.append({
             "document_id": chunk.document_id,
