@@ -211,3 +211,23 @@ def rerank(query: str, candidates: List[Tuple[object, float]], top_n: int):
     kept.sort(key=lambda r: (-r[2], r[3]))
     logger.info("rerank[llm]: %d -> %d kept (top_n=%d)", len(candidates), len(kept), top_n)
     return _guarantee_fused_top(candidates, [(chunk, orig_score) for chunk, orig_score, _s, _i in kept], top_n)
+
+
+def top_relevance(query: str, chunks: List[object]) -> Optional[float]:
+    """回傳這批 chunks 對 query 的「最高 cross-encoder 相關性分數」（0-1）當信心訊號。
+
+    供低信心 fallback 判斷用：實測相關題 top ≥0.4、離題 ≈0.00。
+    cross-encoder 不可用時回 None（呼叫端應略過 gate，不要因此退化）。
+    """
+    if not chunks:
+        return None
+    model = _get_cross_encoder()
+    if model is None:
+        return None
+    try:
+        pairs = [(query, (getattr(c, "text", "") or "")[:_SNIPPET_CHARS]) for c in chunks]
+        scores = model.predict(pairs)
+        return float(max(scores)) if len(scores) else None
+    except Exception as e:
+        logger.warning("top_relevance scoring failed: %s", e)
+        return None

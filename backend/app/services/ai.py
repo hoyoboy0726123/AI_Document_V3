@@ -356,6 +356,62 @@ def generate_rag_answer(
     return _chat_with_provider(messages, think=True)
 
 
+_LOWCONF_TEMPLATE_TIPS = (
+    "建議調整查詢：\n"
+    "- 改用文件中的實際術語或數值（例如型號、規格編號、頻率值）\n"
+    "- 指定文件或分類以縮小範圍\n"
+    "- 換更具體的關鍵字，或把問題拆得更小\n"
+    "- 確認該資訊是否已上傳到系統"
+)
+
+
+def low_confidence_answer(
+    question: str,
+    context_blocks: List[Dict[str, Any]],
+) -> str:
+    """檢索信心偏低時的回應：不硬答，而是列出「最接近的內容」＋ LLM 動態產生的查詢修正建議。
+
+    建議由 LLM 依「問題＋最接近片段」生成（走 _chat_with_provider，雲地皆可）；失敗退回模板。
+    """
+    closest_lines: List[str] = []
+    for i, b in enumerate((context_blocks or [])[:3], start=1):
+        title = b.get("title") or "未命名段落"
+        page = b.get("page")
+        snip = re.sub(r"\s+", " ", (b.get("text") or "").strip())[:160]
+        loc = f" 第{page}頁" if page else ""
+        closest_lines.append(f"- [{i}] {title}{loc}：{snip}…")
+    closest = "\n".join(closest_lines) if closest_lines else "（資料庫中沒有可顯示的接近內容）"
+
+    tips: Optional[str] = None
+    if closest_lines:
+        try:
+            sys_msg = "你是文件問答助手。資料庫中沒有與使用者問題高度相關的內容。"
+            prompt = (
+                f"使用者問題：{question}\n\n"
+                f"資料庫中最接近的內容片段：\n{closest}\n\n"
+                "請用繁體中文簡短回覆：\n"
+                "1) 用一句話說明資料庫裡比較多的是什麼主題（依上面片段判斷）。\n"
+                "2) 給 2~3 條具體的查詢修正建議，幫使用者更可能找到想要的資訊"
+                "（例如改用哪些術語／數值、指定哪份文件或分類、換什麼關鍵字）。\n"
+                "不要杜撰片段中沒有的事實，也不要直接回答原問題本身。"
+            )
+            tips = _chat_with_provider(
+                [{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}],
+                think=False,
+            )
+        except Exception as e:
+            logger.warning("low-confidence suggestion generation failed: %s", e)
+    if not (tips and tips.strip()):
+        tips = _LOWCONF_TEMPLATE_TIPS
+
+    return (
+        "⚠️ 資料庫中沒有找到與您問題「高度相關」的內容（檢索信心偏低）。"
+        "以下是最接近的片段，但可能不直接相關：\n\n"
+        f"{closest}\n\n"
+        f"{tips.strip()}"
+    )
+
+
 def generate_rag_answer_stream(
     question: str,
     context_blocks: List[Dict[str, str]],

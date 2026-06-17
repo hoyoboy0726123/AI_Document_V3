@@ -326,6 +326,8 @@ class RAGQueryResponse(BaseModel):
     suggested_questions: List[str] = Field(default_factory=list)
     # 是否使用了 AI 備援模式（非文件查詢）
     used_ai_fallback: bool = False
+    # 檢索信心偏低（最相關段落 cross-encoder 分數低於門檻）：answer 已改為「最接近內容＋修正建議」
+    low_confidence: bool = False
 
 
 class MetadataOptionUpdate(BaseModel):

@@ -127,6 +127,11 @@ class Settings(BaseSettings):
     # cross_encoder 載入失敗會自動退回 llm。
     RAG_RERANK_BACKEND: str = "cross_encoder"
     RAG_RERANK_MODEL: str = "BAAI/bge-reranker-base"  # 多語(含中英)cross-encoder，CPU 可跑
+
+    # 低信心 fallback：以「最相關段落的 cross-encoder 分數」當信心訊號。實測相關題 top 分數
+    # ≥0.4(離題 ≈0.00），故門檻設 0.15 可乾淨分開。低於此值時不硬答，改回「最接近的內容
+    # ＋ LLM 動態產生的查詢修正建議」。CE 不可用時此 gate 自動略過（不退化）。
+    RAG_LOWCONF_CE_THRESHOLD: float = 0.15
     RAG_RERANK_CE_MIN_SCORE: float = 0.0        # cross-encoder 分數門檻（logit，>0 偏相關）
 
 

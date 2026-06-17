@@ -351,18 +351,20 @@ def _structural_evidence(db: Session, question: str, conversation_history) -> Op
     return {"rag_evidence": rag_evidence, "kg_notes": kg_notes, "matched": matched}
 
 
-def _seed_evidence_via_rag(db: Session, question: str, top_k: int = 5) -> List[Dict[str, Any]]:
-    """用「使用者原始問題」跑 /rag/query 完全相同的檢索，回傳 rag_evidence 形狀的證據。
+def _seed_evidence_via_rag(db: Session, question: str, top_k: int = 5) -> tuple:
+    """用「使用者原始問題」跑 /rag/query 完全相同的檢索，回傳 (evidence, confidence)。
 
     刻意重用 rag.py 的 _hybrid_filtered / _context_keep_ids / _context_text_budgeted，
     讓 Agent 的基準證據與 RAG 模式逐字一致（已驗證對地端與雲端都能撈到正確的表格段）。
+    confidence = 最相關段落的 cross-encoder 分數（None 表示 CE 不可用）。
     """
     import types as _types
+    from . import rerank
     from ..api.v1 import rag as rag_api  # lazy import to avoid import cycle
 
     embeddings = ai.embed_texts([question])
     if not embeddings:
-        return []
+        return [], None
     cfg = SystemConfigService(db).get_vector_config()
     payload = _types.SimpleNamespace(
         question=question, top_k=top_k, document_id=None, classification_id=None,
@@ -370,7 +372,8 @@ def _seed_evidence_via_rag(db: Session, question: str, top_k: int = 5) -> List[D
     )
     filtered = rag_api._hybrid_filtered(db, payload, question, embeddings[0], cfg, top_k)
     if not filtered:
-        return []
+        return [], None
+    confidence = rerank.top_relevance(question, [c for c, _ in filtered])
     keep_ids = rag_api._context_keep_ids(filtered)
     evidence: List[Dict[str, Any]] = []
     ctx_used = 0
@@ -386,7 +389,7 @@ def _seed_evidence_via_rag(db: Session, question: str, top_k: int = 5) -> List[D
             "score": score,
             "snippet": text,
         })
-    return evidence
+    return evidence, confidence
 
 
 def run_agent(
@@ -446,11 +449,29 @@ def run_agent(
     # 這保證最終 grounded 合成一定握有「對的證據」，不因換模型（尤其雲端）在 ReAct loop
     # 自擬關鍵字偏掉而撈錯段。ReAct loop 仍照常進行、可再補 KG/額外證據；合成時會去重。
     try:
-        seeded = _seed_evidence_via_rag(db, question, top_k=5)
+        seeded, seed_conf = _seed_evidence_via_rag(db, question, top_k=5)
         rag_evidence.extend(seeded)
         if seeded:
             yield {"type": "thought", "step": 0,
                    "text": "先以原始問題做一次基準檢索（與 RAG 同一條 pipeline），確保證據齊全且與所用模型無關。"}
+        # 低信心 fallback（與 RAG 模式一致）：最相關段落 CE 分數低於門檻 → 不硬跑 ReAct，
+        # 直接回「最接近內容 + 修正建議」。
+        threshold = getattr(settings, "RAG_LOWCONF_CE_THRESHOLD", 0.15)
+        # 列舉題交給下方 KG 列舉 fallback，不在這裡因 RAG 信心低就放棄。
+        if seed_conf is not None and seed_conf < threshold and not _looks_like_enumeration(question):
+            closest = [
+                {"title": ev.get("title"), "page": ev.get("page"), "text": ev.get("snippet")}
+                for ev in seeded[:3]
+            ]
+            low_sources = [
+                {"document_id": ev.get("document_id"), "title": ev.get("title"),
+                 "page": ev.get("page"), "snippet": ev.get("snippet"), "score": ev.get("score")}
+                for ev in seeded[:5]
+            ]
+            yield {"type": "final",
+                   "text": ai.low_confidence_answer(question, closest),
+                   "sources": low_sources}
+            return
     except Exception as e:
         logger.warning("agent seed retrieval failed: %s", e)
 

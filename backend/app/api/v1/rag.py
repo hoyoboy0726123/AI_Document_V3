@@ -273,6 +273,22 @@ def query_rag(
         })
 
     final_question = optimized_query or question
+
+    # 低信心 fallback：最相關段落的 cross-encoder 分數都低於門檻 → 不硬答，
+    # 改回「最接近內容 + LLM 動態產生的查詢修正建議」（CE 不可用時 conf=None，照常作答）。
+    conf = rerank.top_relevance(search_query, [c for c, _ in filtered])
+    if conf is not None and conf < getattr(settings, "RAG_LOWCONF_CE_THRESHOLD", 0.15):
+        closest = contexts or [
+            {"title": s.title, "page": s.page, "text": s.snippet} for s in sources[:3]
+        ]
+        return schemas.RAGQueryResponse(
+            answer=ai.low_confidence_answer(final_question, closest),
+            sources=sources,
+            is_followup=is_followup,
+            optimized_query=optimized_query,
+            low_confidence=True,
+        )
+
     history = (
         [{"question": m.question, "answer": m.answer} for m in payload.conversation_history]
         if payload.conversation_history else None
